@@ -20,6 +20,7 @@ import {
   isBase64ImageWithinLimits,
 } from "@/lib/image-attachments";
 import { VoiceInputButton } from "./VoiceInputButton";
+import { VoiceCallButton } from "./VoiceCallButton";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { joinTranscript } from "@/lib/voice/text";
 import {
@@ -121,6 +122,8 @@ interface Props {
   cwd?: string | null;
   /** Files picked with the attach button, handled like files dropped onto the chat. Without it the button takes images only. */
   onAttachFiles?: (files: File[]) => void;
+  /** Opens the two-layer realtime voice call. Omitted when there is no live session. */
+  onVoiceCall?: () => void;
 }
 
 export interface ChatInputHandle {
@@ -766,6 +769,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   draftKey,
   cwd,
   onAttachFiles,
+  onVoiceCall,
   compact = false,
 }: Props, ref) {
   const { t } = useI18n();
@@ -2716,6 +2720,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               onStart={voice.start}
               onStop={voice.stop}
             />
+            {onVoiceCall && !compact && (
+              <VoiceCallButton isMobile={isMobile} controlSize={controlSize} onStart={onVoiceCall} />
+            )}
             {/* Model selector - visible always, busy while a switch is pending; a switch during a run applies from its next request */}
             {(modelOptions.length > 0 || model || modelError) && onModelChange && (
               <ModelSelector

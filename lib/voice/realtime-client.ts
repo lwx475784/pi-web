@@ -1,4 +1,6 @@
-// A minimal OpenAI Realtime WebSocket client for dictation (input-only).
+// A minimal OpenAI Realtime WebSocket client for voice sessions: dictation
+// (input-only, auto-cancels the assistant reply) and conversation (keeps the
+// reply's audio, transcripts and tool calls).
 //
 // The speech-to-speech server (https://github.com/huggingface/speech-to-speech)
 // drives turns with its own VAD: it emits transcription events per utterance,
@@ -18,6 +20,16 @@ export interface DictationHandlers {
   /** In-progress hypothesis across all not-yet-final items (display only). */
   onPartial: (transcript: string) => void;
   onError?: (error: DictationError) => void;
+  /** The user started talking: a conversation client flushes its player. */
+  onSpeechStarted?: () => void;
+  /** Assistant reply audio (base64 PCM16 at the pipeline rate). */
+  onAudioChunk?: (base64Pcm16: string) => void;
+  /** Incremental assistant transcript text. */
+  onAssistantDelta?: (text: string) => void;
+  /** The model called a tool declared in `tools`. */
+  onFunctionCall?: (call: { callId: string; name: string; argumentsJson: string }) => void;
+  /** A response closed: completed | cancelled | failed | incomplete. */
+  onResponseDone?: (status: string) => void;
 }
 
 export interface WsLike {
@@ -35,6 +47,9 @@ export interface RealtimeClientOptions {
   cancelResponses?: boolean;
   WebSocketImpl?: WsCtor;
   connectTimeoutMs?: number;
+  /** Function tools for `session.update` (conversation mode). */
+  tools?: unknown[];
+  instructions?: string;
 }
 
 const SILENCE_CHUNK_B64 = "AA".repeat(3200); // 100 ms of 16 kHz mono PCM16
@@ -111,6 +126,8 @@ export class RealtimeDictationClient {
                 type: "realtime",
                 audio: { input: { turn_detection: { type: "server_vad" } } },
                 extensions: ["speech_to_speech.input_audio_transcription.snapshot"],
+                ...(this.opts.instructions ? { instructions: this.opts.instructions } : {}),
+                ...(this.opts.tools?.length ? { tools: this.opts.tools } : {}),
               },
             }));
             resolve(url);
@@ -121,6 +138,19 @@ export class RealtimeDictationClient {
       })),
       Promise.reject(lastFailure) as Promise<string>,
     );
+  }
+
+  sendEvent(event: Record<string, unknown>): void {
+    this.ws?.send(JSON.stringify(event));
+  }
+
+  /** Deliver a tool result; `createResponse` also asks the model to speak it. */
+  sendFunctionOutput(callId: string, output: string, createResponse = true): void {
+    this.sendEvent({
+      type: "conversation.item.create",
+      item: { type: "function_call_output", call_id: callId, output },
+    });
+    if (createResponse) this.sendEvent({ type: "response.create" });
   }
 
   sendAudio(base64Pcm16: string): void {
@@ -173,10 +203,37 @@ export class RealtimeDictationClient {
         this.emitPartial();
         return;
       }
+      case "input_audio_buffer.speech_started": {
+        this.handlers.onSpeechStarted?.();
+        return;
+      }
       case "response.created": {
         // Dictation does not want the assistant's reply: cancel it as soon as
         // it opens so no audio is synthesized and no history is kept.
         if (this.opts.cancelResponses !== false) this.ws?.send(JSON.stringify({ type: "response.cancel" }));
+        return;
+      }
+      case "response.output_audio.delta": {
+        const chunk = msg.delta;
+        if (typeof chunk === "string") this.handlers.onAudioChunk?.(chunk);
+        return;
+      }
+      case "response.output_audio_transcript.delta": {
+        const chunk = msg.delta;
+        if (typeof chunk === "string") this.handlers.onAssistantDelta?.(chunk);
+        return;
+      }
+      case "response.function_call_arguments.done": {
+        this.handlers.onFunctionCall?.({
+          callId: String(msg.call_id ?? ""),
+          name: String(msg.name ?? ""),
+          argumentsJson: String(msg.arguments ?? "{}"),
+        });
+        return;
+      }
+      case "response.done": {
+        const response = (msg.response ?? {}) as Record<string, unknown>;
+        this.handlers.onResponseDone?.(String(response.status ?? "completed"));
         return;
       }
       case "error": {
