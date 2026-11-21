@@ -19,10 +19,10 @@ interface Caption {
 const ASK_PI_TOOL = {
   type: "function",
   name: "ask_pi",
-  description: "Ask the pi coding agent working in this folder: their files, memory, projects, tools, history, or any task that takes real work. Returns pi's answer. Say one short acknowledgement first.",
+  description: "Ask the pi coding agent working in this folder: their files, memory, projects, tools, history, or any task that takes real work. Returns pi's answer. Say one short acknowledgement first, in the user's own language.",
   parameters: {
     type: "object",
-    properties: { question: { type: "string", description: "The user's request, phrased for pi." } },
+    properties: { question: { type: "string", description: "The request rephrased as fluent text in the language the user spoke, with speech-to-text errors fixed. Never translate it into another language." } },
     required: ["question"],
   },
 };
@@ -34,6 +34,7 @@ const VOICE_LAYER_INSTRUCTIONS = [
   "For anything about their files, memory, projects, tools, or longer work, call ask_pi; before the call say one brief acknowledgement in Chinese.",
   "Answer greetings and small talk yourself.",
   "Always reply in Chinese, at most two short sentences; the answer of ask_pi is spoken back to the user in your own words.",
+  "The user's speech is auto-transcribed and may contain wrong words; silently fix them when calling ask_pi and keep the user's own language.",
 ].join(" ");
 
 export function VoiceConversationPanel({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
@@ -99,7 +100,7 @@ export function VoiceConversationPanel({ sessionId, onClose }: { sessionId: stri
         setPiBusy(true);
         const id = seqRef.current++;
         setCaptions((prev) => [...prev, { id, who: "pi", text: `… ${question}` }]);
-        void askPiReply(sessionId, question)
+        void askPiReply(sessionId, `[语音通话] ${question}`)
           .then((answer) => {
             setCaptions((prev) => [...prev.map((c) => (c.id === id ? { ...c, text: answer } : c))]);
             if (!disposed) client.sendFunctionOutput(callId, answer);
