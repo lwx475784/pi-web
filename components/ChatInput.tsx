@@ -19,6 +19,9 @@ import {
   MAX_ATTACHED_IMAGES,
   isBase64ImageWithinLimits,
 } from "@/lib/image-attachments";
+import { VoiceInputButton } from "./VoiceInputButton";
+import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { joinTranscript } from "@/lib/voice/text";
 import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
@@ -830,6 +833,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
 
+  const insertVoiceSegment = useCallback((text: string) => {
+    const ta = textareaRef.current;
+    if (!ta) {
+      setValue((v) => joinTranscript(v, text));
+      return;
+    }
+    const caret = ta.selectionStart ?? ta.value.length;
+    const insert = joinTranscript(ta.value.slice(0, caret), text);
+    if (!insert) return;
+    replaceTextareaRange(ta, caret, caret, insert);
+    setAtQuery(null);
+    requestAnimationFrame(() => autoGrowTextarea(ta));
+  }, []);
+  const voice = useVoiceInput(insertVoiceSegment);
+  const voiceCancel = voice.cancel;
+
   useImperativeHandle(ref, () => ({
     setText(text: string) {
       const ta = textareaRef.current;
@@ -1240,6 +1259,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     if (!msg && !attachedImages.length) return;
+    voiceCancel();
     onAudioUnlock?.();
     const builtinAllowed = !isStreaming || offersBuiltinSlashCommandWhileStreaming(msg);
     if (builtinAllowed && await runBuiltinCommand(msg)) return;
@@ -1247,7 +1267,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (isStreaming && !(msg.startsWith("!") && !attachedImages.length)) return;
     clearInput();
     onSend(msg, attachedImages.length ? attachedImages : undefined);
-  }, [value, attachedImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+  }, [value, attachedImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock, voiceCancel]);
 
   const slashQuery = !compact && value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -2633,6 +2653,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           </div>
         )}
 
+        {voice.status === "connecting" || voice.status === "listening" || voice.status === "finishing" || (voice.status === "error" && voice.error) ? (
+          <div
+            className="text-xs px-2 py-1"
+            role={voice.status === "error" ? "alert" : "status"}
+            style={{ color: voice.status === "error" ? "#ef4444" : "var(--text-muted)", marginTop: 4 }}
+          >
+            {voice.status === "error"
+              ? t("chat.voiceError", { message: voice.error ?? "" })
+              : voice.status === "connecting"
+                ? t("chat.voiceConnecting")
+                : voice.status === "finishing"
+                  ? t("chat.voiceFinishing")
+                  : voice.partial || t("chat.voiceListening")}
+          </div>
+        ) : null}
+
         {/* Bottom bar: left | center (context) | right */}
         {!compact && <div className="chat-input-controls" style={{
           marginTop: isMobile ? 4 : 8,
@@ -2672,6 +2708,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <polyline points="21 15 16 10 5 21" />
               </svg>
             </button>
+            <VoiceInputButton
+              status={voice.status}
+              support={voice.support}
+              isMobile={isMobile}
+              controlSize={controlSize}
+              onStart={voice.start}
+              onStop={voice.stop}
+            />
             {/* Model selector - visible always, busy while a switch is pending; a switch during a run applies from its next request */}
             {(modelOptions.length > 0 || model || modelError) && onModelChange && (
               <ModelSelector
