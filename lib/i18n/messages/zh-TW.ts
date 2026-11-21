@@ -838,6 +838,8 @@ export const zhTWLocale: LocalePlugin = {
     "voiceCall.askingPi": "正在問 pi…",
     "voiceCall.error": "語音對話失敗：{message}",
     "voiceCall.hint": "直接說話。",
+    "voiceCall.collapse": "收起",
+    "voiceCall.expand": "返回通話",
     "chat.previewImage": "預覽圖片",
     "chat.filterModels": "篩選模型…",
     "chat.modelScopeScoped": "已限定",

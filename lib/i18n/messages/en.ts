@@ -838,6 +838,8 @@ export const enLocale: LocalePlugin = {
     "voiceCall.askingPi": "Asking pi…",
     "voiceCall.error": "Voice call failed: {message}",
     "voiceCall.hint": "Just speak.",
+    "voiceCall.collapse": "Collapse",
+    "voiceCall.expand": "Back to call",
     "chat.previewImage": "Preview image",
     "chat.filterModels": "Filter models…",
     "chat.modelScopeScoped": "scoped",
