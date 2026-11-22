@@ -319,8 +319,15 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
     }
   }, []);
 
-  /** Free the microphone. The socket, audio out and transcript stay live. */
+  /**
+   * Free the microphone. The socket, audio out and transcript stay live — and the sentence the
+   * user is mid-way through gets its chance to land first: the server ends turns on the audio clock
+   * only, so stopping capture cold would strand both that utterance and every announcement queued
+   * behind it (ADR 0008 #8).
+   */
   const stopCapture = useCallback(async (): Promise<void> => {
+    const client = clientRef.current;
+    if (client) await client.flushSpeakingTurn().catch(() => undefined);
     const mic = micRef.current;
     micRef.current = null;
     if (mic) await mic.stop().catch(() => undefined);

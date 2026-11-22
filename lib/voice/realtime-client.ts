@@ -131,6 +131,8 @@ export class RealtimeDictationClient {
   private endedReported = false;
   /** The app hung up: a close we asked for is not a lost call. */
   private closingSocket = false;
+  /** Waiting for the sentence in flight to end (see `flushSpeakingTurn`). */
+  private readonly speakingWaiters: Array<() => void> = [];
   /** Out-of-band announcements to speak, oldest first, each with the tag its caller asked back. */
   private readonly notices: { text: string; tag: string }[] = [];
   /** The user is mid-sentence: hold an announcement until they finish. */
@@ -298,11 +300,49 @@ export class RealtimeDictationClient {
     for (let i = 0; i < count; i++) this.sendAudio(SILENCE_CHUNK_B64);
   }
 
+  /**
+   * Give the sentence the user is mid-way through a chance to finish before the microphone is
+   * released. The server decides turn boundaries from the audio clock alone — it has no timer for
+   * "the client stopped sending" — so releasing capture mid-sentence would strand that utterance
+   * uncommitted *and* leave `speaking` true forever, which parks every later announcement behind a
+   * sentence nobody is speaking any more (ADR 0008 #8).
+   *
+   * Returns whether the sentence landed. When it did not, the dangling transcript is dropped: a
+   * half-word the user abandoned must not reappear in the caption of the next call.
+   */
+  async flushSpeakingTurn(timeoutMs = 300): Promise<boolean> {
+    if (!this.ws) return true;
+    const settled = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      this.speakingWaiters.push(() => { clearTimeout(timer); resolve(true); });
+    });
+    // Three 100 ms frames clears the server's 300 ms minimum silence, which is what ends a turn.
+    this.sendSilenceChunks(3);
+    const landed = await settled;
+    if (!landed) this.discardSpeakingTurn();
+    return landed;
+  }
+
+  /** Stop waiting on a sentence that is not going to commit, and forget its partial text. */
+  private discardSpeakingTurn(): void {
+    this.speaking = false;
+    this.pending.clear();
+    this.lastKey = "";
+    this.emitPartial();
+    this.releaseSpeakingWaiters();
+  }
+
+  private releaseSpeakingWaiters(): void {
+    const waiters = this.speakingWaiters.splice(0);
+    for (const release of waiters) release();
+  }
+
   close(): void {
     const ws = this.ws;
     this.ws = null;
     // A hang-up is not an outage: the close it causes must not report a lost call.
     this.closingSocket = true;
+    this.releaseSpeakingWaiters();
     try { ws?.close(); } catch { /* already closed */ }
   }
 
@@ -368,6 +408,7 @@ export class RealtimeDictationClient {
       // an announcement must not sit behind a stuck `speaking` flag.
       case "input_audio_buffer.committed": {
         this.speaking = false;
+        this.releaseSpeakingWaiters();
         this.replyWhenClear();
         return;
       }
