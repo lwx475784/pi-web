@@ -19,6 +19,14 @@ export interface AskPiOptions {
   watcher?: RunEndWatcher;
   /** Correlation id for the submission; a UUID by default, injectable so a test can pin it. */
   requestIdFactory?: () => string;
+  /**
+   * Post the ask straight into the running turn's queue instead of trying to start a run. The user
+   * agreed to wait; joining a run means the answer cannot be attributed by name, so the caller is
+   * told (see `onDisposition`) and the answer is recorded rather than spoken.
+   */
+  queueBehind?: boolean;
+  /** How the submission landed, known before the answer arrives. */
+  onDisposition?: (disposition: { joinedAnotherRun: boolean }) => void;
 }
 
 /** Thrown when the caller cancelled: a stale answer must not be announced. */
@@ -141,13 +149,15 @@ export async function askPiReply(sessionId: string, question: string, opts: AskP
     body: JSON.stringify(body),
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
-  let res = await post({ type: "prompt", message: question, requestId });
+  let res = opts.queueBehind
+    ? await post({ type: "prompt", message: question, requestId, streamingBehavior: "followUp" })
+    : await post({ type: "prompt", message: question, requestId });
   if (aborted()) throw new PiRequestCancelled();
   let sent = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
   // Whether this submission joined a run somebody else started. Such a message gets no run
   // identity back (pi only names the run its own prompt started), so the event handshake cannot
   // see its end and the poll has to.
-  let joinedAnotherRun = false;
+  let joinedAnotherRun = opts.queueBehind === true;
   if (!res.ok || sent.error) {
     if (sent.code !== "prompt_rejected") throw new Error(sent.error ?? `pi send failed (HTTP ${res.status})`);
     // pi is mid-run. Its SDK refuses a bare prompt while a run streams ("Agent is already
@@ -161,6 +171,7 @@ export async function askPiReply(sessionId: string, question: string, opts: AskP
     if (!res.ok || sent.error) throw new Error("pi is busy");
     joinedAnotherRun = true;
   }
+  opts.onDisposition?.({ joinedAnotherRun });
 
   if (opts.watcher && !joinedAnotherRun) {
     const ended = await waitRunEnd(opts.watcher, sessionId, requestId, timeoutMs, opts.signal);
@@ -250,6 +261,29 @@ async function pollForAnswer(
     if (text) return text;
   }
   throw new Error("pi did not answer in time");
+}
+
+/**
+ * How many messages pi has queued behind the running turn. A session-wide stop empties that queue
+ * and hands the texts back to whoever sent them — for a prompt typed at the keyboard, that is a
+ * page the user is not looking at — so the voice layer asks this before it agrees (ADR 0008 #5).
+ */
+export async function readPiQueueCount(
+  sessionId: string,
+  opts: { fetchImpl?: (input: string, init?: RequestInit) => Promise<Response> } = {},
+): Promise<number> {
+  const call = opts.fetchImpl ?? localApiFetch;
+  try {
+    const s = await call(`/api/agent/${encodeURIComponent(sessionId)}?systemPrompt=0`);
+    if (!s.ok) return 0;
+    const body = (await s.json()) as { state?: { queuedMessages?: { steering?: unknown; followUp?: unknown } | null } | null };
+    const queued = body.state?.queuedMessages;
+    const count = (value: unknown) => (Array.isArray(value) ? value.length : 0);
+    return count(queued?.steering) + count(queued?.followUp);
+  } catch {
+    // Unknown is not zero: the caller decides what it can promise without the number.
+    return 0;
+  }
 }
 
 /**

@@ -7,8 +7,9 @@ import { startMicCapture, type MicHandle } from "@/lib/voice/mic";
 import { createAudioOut, type AudioOutHandle } from "@/lib/voice/audio-out";
 import { getEventStreamEnabled, getGateSensitivity, getRealtimeUrls, getWakeWord } from "@/lib/voice/settings";
 import { classifyTurn, createNearSpeechGate, type NearGateHandle } from "@/lib/voice/turn-gate";
-import { askPiReply, createRequestId, isPiRequestCancelled, stopPiRun } from "@/lib/voice/pi-bridge";
+import { askPiReply, createRequestId, isPiRequestCancelled, readPiQueueCount, stopPiRun } from "@/lib/voice/pi-bridge";
 import { createRunEndWatcher, type RunEndWatcher } from "@/lib/voice/answer-watcher";
+import { decideAsk, decideStop, maySpeak, normalizeStopScope, type StopScope } from "@/lib/voice/job-policy";
 import { markAnnouncementsRead, readLedger, recordAnnouncement } from "@/lib/voice/ledger-api";
 import { appendCallTurn, buildReplayMessage, loadCallHistory, migrateCallHistory, type CallTurn } from "@/lib/voice/call-history";
 import { useI18n } from "@/hooks/useI18n";
@@ -33,15 +34,27 @@ interface PiJob {
   controller: AbortController;
   cancelled: boolean;
   requestId: string;
+  /**
+   * Whether this ask started the run pi is in. pi only names the run its own prompt started, so a
+   * queued ask cannot be told apart from that turn's other output: its answer is recorded, never
+   * spoken, and a spoken stop cannot pull it out (ADR 0008 #3, #5).
+   */
+  ownsRun: boolean;
 }
+
+/** How long a "全部停止" confirmation stays live: long enough to answer, short enough to lapse. */
+const STOP_CONFIRM_WINDOW_MS = 45_000;
 
 const ASK_PI_TOOL = {
   type: "function",
   name: "ask_pi",
-  description: "Hand work to the pi coding agent in this folder: their files, memory, projects, tools, history, or any task that takes real work. It answers seconds or minutes later, never inside this call: the result arrives as a message marked [background event].",
+  description: "Hand work to the pi coding agent in this folder: their files, memory, projects, tools, history, or any task that takes real work. It answers seconds or minutes later, never inside this call: the result arrives as a message marked [background event]. One job at a time: while one runs the call answers {state:\"conflict\", running:[...]}, so ask the user whether to queue behind it (call again with when_busy=\"queue\") or stop it (stop_pi). A queued answer is written to the page as unread and is never spoken, because it cannot be matched back to your question.",
   parameters: {
     type: "object",
-    properties: { question: { type: "string", description: "The request rephrased as fluent text in the language the user spoke, with speech-to-text errors fixed. Never translate it into another language." } },
+    properties: {
+      question: { type: "string", description: "The request rephrased as fluent text in the language the user spoke, with speech-to-text errors fixed. Never translate it into another language." },
+      when_busy: { type: "string", enum: ["queue"], description: "Pass only after the user agreed to wait behind the job already running." },
+    },
     required: ["question"],
   },
 };
@@ -49,8 +62,15 @@ const ASK_PI_TOOL = {
 const STOP_PI_TOOL = {
   type: "function",
   name: "stop_pi",
-  description: "Stop the work pi is doing for the user because they cancelled it — they said to forget it, stop, or that the answer is no longer wanted. Takes no argument and returns at once; the answer will not arrive.",
-  parameters: { type: "object", properties: {}, required: [] },
+  description: "Stop something the voice call is doing, and return at once. scope=\"ask\" (default) cancels the ask this call started and the run it owns; scope=\"announcements\" only silences further announcements while pi keeps working, and its answers stay unread on the page; scope=\"everything\" stops the whole session, which costs the messages the user typed into the queue too — the tool asks you to confirm, and you pass confirmed=true only after the user agreed.",
+  parameters: {
+    type: "object",
+    properties: {
+      scope: { type: "string", enum: ["ask", "announcements", "everything"] },
+      confirmed: { type: "boolean", description: "true only when the user has just confirmed a session-wide stop." },
+    },
+    required: [],
+  },
 };
 
 // Model-facing copy (not UI): stable across locales, the voice layer always
@@ -60,6 +80,9 @@ const VOICE_LAYER_INSTRUCTIONS = [
   "For anything about their files, memory, projects, tools, or longer work, call ask_pi.",
   "ask_pi only starts the job and returns at once: after the call say one short line in Chinese that you asked pi, then keep listening — never wait for the answer.",
   "A message marked [background event] comes from pi, not the user: tell the user briefly in your own words what it found.",
+  "ask_pi answers {state:\"conflict\"} while a job runs. Ask the user in one line whether to queue behind it or stop it; never start a second job on your own.",
+  "A stop of the whole session is offered once and takes confirmed=true on the next call: repeat in one line what it costs, and only confirm if the user agrees.",
+  "If the user says they are done hearing results, call stop_pi with scope=\"announcements\": pi keeps working and the answers stay unread on the page.",
   "If the user says to stop or forget what pi is looking up, call stop_pi.",
   "Answer greetings and small talk yourself.",
   "Always reply in Chinese, at most two short sentences.",
@@ -115,6 +138,10 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
   const audioRef = useRef<AudioOutHandle | null>(null);
   /** Watches pi's run-end events for every job this call started. */
   const watcherRef = useRef<RunEndWatcher | null>(null);
+  /** "别念了": the call records answers but stops speaking them (ADR 0008 #5). */
+  const announcementsMutedRef = useRef(false);
+  /** When a session-wide stop was offered, so only the next few seconds count as a yes. */
+  const stopArmedUntilRef = useRef(0);
   const listRef = useRef<HTMLDivElement | null>(null);
   const seqRef = useRef(1);
   const meIdRef = useRef(0);
@@ -159,16 +186,16 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
   const refreshUnreadRef = useRef(refreshUnread);
   refreshUnreadRef.current = refreshUnread;
 
-  /** Record one finished ask, then say it, tagged with the entry to clear once it is heard. */
+  /** Record one finished ask; speak it only when its answer can be attributed and the user still wants to hear it. */
   const announce = useCallback(async (sid: string, spoken: string, entry: {
     requestId: string;
     kind: "answer" | "failure";
     question: string;
     text: string;
-  }): Promise<void> => {
+  }, speak: boolean): Promise<void> => {
     const id = await recordAnnouncement(sid, entry);
     await refreshUnread(sid);
-    clientRef.current?.notify(spoken, id ?? "");
+    if (speak) clientRef.current?.notify(spoken, id ?? "");
   }, [refreshUnread]);
   const announceRef = useRef(announce);
   announceRef.current = announce;
@@ -185,16 +212,17 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
     clientRef.current?.notify(`上次通话没念的${newest.kind === "failure" ? "失败" : "回答"}：${newest.text}${more}`, newest.id);
   }, []);
 
-  /** Drop every job the voice layer started: no answer, no announcement. */
-  const stopPiJobs = useCallback(() => {
-    const jobs = [...jobsRef.current.values()];
-    jobsRef.current.clear();
-    setPiBusy(false);
-    clientRef.current?.dropNotifications();
+  /**
+   * Cancel the asks named: no answer, no announcement, and a cancelled record in the ledger so the
+   * stopped question is accounted for rather than lost.
+   */
+  const cancelJobs = useCallback((jobs: PiJob[]): void => {
+    if (jobs.length === 0) return;
     const sid = sessionRef.current;
-    if (sid && jobs.length) void stopPiRun(sid);
-    for (const job of jobs) {
-      // A stopped ask is still a record: the ledger shows it was stopped rather than lost.
+    clientRef.current?.dropNotifications();
+    for (const [callId, job] of [...jobsRef.current]) {
+      if (!jobs.includes(job)) continue;
+      jobsRef.current.delete(callId);
       if (sid) void recordAnnouncement(sid, { requestId: job.requestId, kind: "cancelled", question: job.question, text: "" })
         .then(() => refreshUnreadRef.current(sid));
       job.cancelled = true;
@@ -203,9 +231,54 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
         ? { ...c, text: `${c.text.replace(/^… /, "")}（${tRef.current("voiceCall.cancelled")}）` }
         : c)));
     }
+    if (jobsRef.current.size === 0) setPiBusy(false);
   }, []);
-  const stopPiJobsRef = useRef(stopPiJobs);
-  stopPiJobsRef.current = stopPiJobs;
+
+  /**
+   * What a spoken stop means, per ADR 0008 #5: only what this call started. A session-wide stop
+   * needs a confirmation, and it is refused while the keyboard has messages queued — pi's abort
+   * empties that queue, and today the voice path threw the pulled-out prompts away.
+   * Returns the line the voice layer should say.
+   */
+  const stopFor = useCallback(async (scope: StopScope, confirmed: boolean): Promise<string> => {
+    const sid = sessionRef.current;
+    const jobs = [...jobsRef.current.values()];
+    const queuedCount = sid ? await readPiQueueCount(sid) : 0;
+    const armed = stopArmedUntilRef.current > Date.now();
+    const action = decideStop(scope, {
+      confirmed: confirmed && armed,
+      queuedCount,
+      ownsRun: jobs.some((job) => job.ownsRun),
+    });
+    switch (action) {
+      case "mute-announcements":
+        announcementsMutedRef.current = true;
+        clientRef.current?.dropNotifications();
+        return "好，不再念了。pi 的活儿继续跑，结果会作为待读留在页面上。";
+      case "ask-confirmation":
+        stopArmedUntilRef.current = Date.now() + STOP_CONFIRM_WINDOW_MS;
+        return "「全部停止」会停掉这个会话正在跑的一切，包括你打字排队的消息。确认就说确认。";
+      case "explain-queue":
+        return `先不动：队列里还有 ${queuedCount} 条你打字的活儿，全停会把它们从队列里拿出来。要我只停语音这条吗？`;
+      case "explain-queued":
+        return "那条已经排进正在跑的回合里，撤不回来。我不会念它的结果，它会作为待读留在页面上。";
+      case "abort-session": {
+        stopArmedUntilRef.current = 0;
+        cancelJobs(jobs);
+        if (sid) void stopPiRun(sid);
+        return "已全部停止。";
+      }
+      case "cancel-ask":
+      default: {
+        const mine = jobs.filter((job) => job.ownsRun);
+        cancelJobs(mine);
+        if (sid && mine.length) void stopPiRun(sid);
+        return mine.length ? "已停掉 pi 正在为语音做的那件事。" : "语音这边没有在跑的活儿了。";
+      }
+    }
+  }, [cancelJobs]);
+  const stopForRef = useRef(stopFor);
+  stopForRef.current = stopFor;
 
   /**
    * Take the microphone: the call starts with it, and opening the panel takes it
@@ -248,11 +321,12 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
   }, []);
 
   /** Hand one question to pi, and announce its answer whenever it lands. */
-  const startPiJob = useCallback((callId: string, question: string) => {
+  const startPiJob = useCallback((callId: string, question: string, queueBehind = false) => {
     const controller = new AbortController();
     const captionId = seqRef.current++;
     const requestId = createRequestId();
-    jobsRef.current.set(callId, { question, captionId, controller, cancelled: false, requestId });
+    const piJob: PiJob = { question, captionId, controller, cancelled: false, requestId, ownsRun: !queueBehind };
+    jobsRef.current.set(callId, piJob);
     setPiBusy(true);
     setCaptions((prev) => [...prev, { id: captionId, who: "pi", text: `… ${question}` }]);
     void (async () => {
@@ -269,6 +343,8 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
           signal: controller.signal,
           watcher: getWatcher() ?? undefined,
           requestIdFactory: () => requestId,
+          queueBehind,
+          onDisposition: (disposition) => { piJob.ownsRun = !disposition.joinedAnotherRun; },
         });
       } catch (e) {
         if (isPiRequestCancelled(e)) return; // the user stopped it: nothing to say
@@ -282,13 +358,16 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
       setCaptions((prev) => prev.map((c) => (c.id === captionId ? { ...c, text: answer } : c)));
       if (failed) setWarning(answer);
       else persistRef.current("pi", answer);
-      // Model-facing: the voice layer says it in its own words.
+      // Model-facing: the voice layer says it in its own words. A queued ask is never spoken
+      // (its answer cannot be matched to its question), and a call the user silenced keeps the
+      // record unread instead — the count on the pill is what stays unmissable.
       const spoken = failed
         ? `pi 没能回答「${question}」：${answer.replace(/^pi: /, "")}`
         : `pi 对「${question}」的回答：${answer}`;
+      const speak = maySpeak(job.ownsRun) && !announcementsMutedRef.current;
       const sid = sessionRef.current;
-      if (sid) await announceRef.current(sid, spoken, { requestId, kind: failed ? "failure" : "answer", question, text: answer });
-      else clientRef.current?.notify(spoken);
+      if (sid) await announceRef.current(sid, spoken, { requestId, kind: failed ? "failure" : "answer", question, text: answer }, speak);
+      else if (speak) clientRef.current?.notify(spoken);
     })();
   }, [getWatcher]);
   const startPiJobRef = useRef(startPiJob);
@@ -384,18 +463,32 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
       },
       onAudioChunk: (b64) => audioOut.enqueue(b64),
       onFunctionCall: ({ callId, name, argumentsJson }) => {
-        let question = "";
-        try { question = String((JSON.parse(argumentsJson) as { question?: string }).question ?? ""); } catch { /* fall through */ }
+        let args: Record<string, unknown> = {};
+        try { args = JSON.parse(argumentsJson) as Record<string, unknown>; } catch { /* fall through */ }
+        const question = String(args.question ?? "").trim();
         if (name === "stop_pi") {
-          stopPiJobsRef.current();
-          client.sendFunctionOutput(callId, "ok: pi stopped, nothing more is coming", true);
+          const scope = normalizeStopScope(args.scope);
+          void stopForRef.current(scope, args.confirmed === true).then((line) => {
+            client.sendFunctionOutput(callId, line, true);
+          });
           return;
         }
         if (name !== "ask_pi" || !question) {
           client.sendFunctionOutput(callId, `unknown tool call ${name}`, false);
           return;
         }
-        startPiJobRef.current(callId, question);
+        // One ask in flight (ADR 0008 #3): a second question is the user's decision, not this
+        // layer's, because joining a running turn costs the answer its identity.
+        const action = decideAsk(jobsRef.current.size, args.when_busy === "queue" ? "queue" : undefined);
+        if (action === "conflict") {
+          client.sendFunctionOutput(callId, JSON.stringify({
+            state: "conflict",
+            running: [...jobsRef.current.values()].map((job) => job.question),
+            options: "ask the user: queue behind it (ask_pi again with when_busy=\"queue\"), or stop it (stop_pi)",
+          }), true);
+          return;
+        }
+        startPiJobRef.current(callId, question, action === "queue");
       },
       onError: (e) => {
         if (disposed) return;
