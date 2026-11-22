@@ -10,6 +10,7 @@ import { classifyTurn, createNearSpeechGate, type NearGateHandle } from "@/lib/v
 import { askPiReply, createRequestId, isPiRequestCancelled, readPiQueueCount, stopPiRun } from "@/lib/voice/pi-bridge";
 import { createRunEndWatcher, type RunEndWatcher } from "@/lib/voice/answer-watcher";
 import { decideAsk, decideStop, maySpeak, normalizeStopScope, type StopScope } from "@/lib/voice/job-policy";
+import { createLeaseClient } from "@/lib/voice/lease-client";
 import { markAnnouncementsRead, readLedger, recordAnnouncement } from "@/lib/voice/ledger-api";
 import { appendCallTurn, buildReplayMessage, loadCallHistory, migrateCallHistory, type CallTurn } from "@/lib/voice/call-history";
 import { useI18n } from "@/hooks/useI18n";
@@ -44,6 +45,19 @@ interface PiJob {
 
 /** How long a "全部停止" confirmation stays live: long enough to answer, short enough to lapse. */
 const STOP_CONFIRM_WINDOW_MS = 45_000;
+
+/**
+ * What to call this device when another one takes the voice line. The server only says "a slot is
+ * busy", so the page names itself: a user holding a phone needs to know which browser to walk over
+ * to, or which stale tab to close.
+ */
+function thisDeviceLabel(): string {
+  const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  const host = typeof window === "undefined" ? "" : window.location.host;
+  const kinds: Array<[RegExp, string]> = [[/iPhone|iPad|iPod/, "iPhone"], [/Android/, "Android"], [/Mac/, "Mac"], [/Windows/, "Windows"]];
+  const kind = kinds.find(([pattern]) => pattern.test(ua))?.[1] ?? "";
+  return [kind, host].filter(Boolean).join(" · ") || "另一台设备";
+}
 
 const ASK_PI_TOOL = {
   type: "function",
@@ -142,6 +156,9 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
   const announcementsMutedRef = useRef(false);
   /** When a session-wide stop was offered, so only the next few seconds count as a yes. */
   const stopArmedUntilRef = useRef(0);
+  /** This call's identity in the one-line lease, and the lease client while the call lives. */
+  const [leaseOwnerId] = useState(createRequestId);
+  const leaseRef = useRef<ReturnType<typeof createLeaseClient> | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const seqRef = useRef(1);
   const meIdRef = useRef(0);
@@ -494,12 +511,24 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
         if (disposed) return;
         const fatal = e.code === "connection_error" || e.code === "session_limit_reached";
         if (fatal) {
-          setError(e.message);
+          setError(e.code === "session_limit_reached"
+            ? tRef.current("voiceCall.occupied", { holder: "另一台设备" })
+            : e.message);
           setStatus("error");
           return;
         }
         // One refused or failed reply: the client re-asks when the way clears.
         setWarning(e.message);
+      },
+      // A call that went quiet without saying why is what the review scored 4/10 as 假在线: the
+      // pill stayed green while nobody could be heard. End it out loud, and give the microphone back.
+      onConnectionEnded: ({ everConnected }) => {
+        if (disposed) return;
+        leaseRef.current?.stop();
+        leaseRef.current = null;
+        setStatus("error");
+        setError(tRef.current(everConnected ? "voiceCall.disconnected" : "voiceCall.occupied", { holder: "另一台设备" }));
+        void stopCapture();
       },
     }, {
       cancelResponses: false,
@@ -508,8 +537,34 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
       instructions: VOICE_LAYER_INSTRUCTIONS,
     });
     clientRef.current = client;
+    // One speech-to-speech slot serves this deployment and the server refuses a second client
+    // rather than preempting the first, so the line is asked for before the socket opens and given
+    // up when a later device takes it (ADR 0008 #7).
+    const lease = createLeaseClient({
+      ownerId: leaseOwnerId,
+      label: thisDeviceLabel(),
+      onReleaseRequested: (takenOverBy) => {
+        if (disposed) return;
+        leaseRef.current = null;
+        setStatus("error");
+        setError(tRef.current("voiceCall.takeover", { holder: takenOverBy }));
+        void stopCapture();
+        client.close();
+      },
+    });
+    leaseRef.current = lease;
     void (async () => {
       try {
+        const held = await lease.acquire();
+        if (disposed) {
+          lease.stop();
+          return;
+        }
+        if (!held.ok) {
+          setError(tRef.current("voiceCall.occupied", { holder: held.holderLabel || "另一台设备" }));
+          setStatus("error");
+          return;
+        }
         await client.connect();
         if (disposed) return;
         const replay = buildReplayMessage(history);
@@ -529,6 +584,9 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
     return () => {
       disposed = true;
       clientRef.current = null;
+      const heldLease = leaseRef.current;
+      leaseRef.current = null;
+      heldLease?.stop();
       for (const job of jobs.values()) {
         job.cancelled = true;
         job.controller.abort();

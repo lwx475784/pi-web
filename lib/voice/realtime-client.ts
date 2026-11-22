@@ -43,6 +43,13 @@ export interface DictationHandlers {
   /** A response closed: completed | cancelled | failed | incomplete. */
   onResponseDone?: (status: string) => void;
   /**
+   * The socket ended on its own: the code and reason the server closed with, and whether this
+   * client ever got a session. A dropped call used to leave the screen exactly as it was — the
+   * pill still green, the microphone still claimed — which is how a dead call gets experienced as
+   * "it stopped listening" (ADR 0008 #7).
+   */
+  onConnectionEnded?: (info: { code: number; reason: string; everConnected: boolean }) => void;
+  /**
    * A queued announcement was actually handed to the model — the moment it stops being owed.
    * `tag` is whatever the caller attached to it; the voice layer passes its ledger entry id, so a
    * replayed answer is marked read when it is spoken and stays unread across a hang-up.
@@ -56,7 +63,7 @@ export interface WsLike {
   onopen: (() => void) | null;
   onmessage: ((ev: { data: unknown }) => void) | null;
   onerror: (() => void) | null;
-  onclose: (() => void) | null;
+  onclose: ((event?: { code?: number; reason?: string }) => void) | null;
 }
 
 export type WsCtor = new (url: string) => WsLike;
@@ -118,6 +125,12 @@ export class RealtimeDictationClient {
   private readonly openCalls = new Set<string>();
   /** A reply is due as soon as the way clears. */
   private owed = false;
+  /** Whether this client ever reached a session, so a close can be told between refused and dropped. */
+  private everConnected = false;
+  /** The socket ended, and the reason was reported. One report per client. */
+  private endedReported = false;
+  /** The app hung up: a close we asked for is not a lost call. */
+  private closingSocket = false;
   /** Out-of-band announcements to speak, oldest first, each with the tag its caller asked back. */
   private readonly notices: { text: string; tag: string }[] = [];
   /** The user is mid-sentence: hold an announcement until they finish. */
@@ -171,8 +184,9 @@ export class RealtimeDictationClient {
           if (msg.type === "session.created") {
             clearTimeout(timer);
             this.ws = ws;
+            this.everConnected = true;
             ws.onerror = () => { this.ws = null; try { ws.close(); } catch { /* gone */ } this.handlers.onError?.({ code: "connection_error", message: "voice server connection lost" }); };
-            ws.onclose = () => { this.ws = null; };
+            ws.onclose = (event) => { this.ws = null; this.reportEnded(event); };
             ws.onmessage = (ev) => this.route(ev);
             ws.send(JSON.stringify({
               type: "session.update",
@@ -287,7 +301,20 @@ export class RealtimeDictationClient {
   close(): void {
     const ws = this.ws;
     this.ws = null;
+    // A hang-up is not an outage: the close it causes must not report a lost call.
+    this.closingSocket = true;
     try { ws?.close(); } catch { /* already closed */ }
+  }
+
+  /** Report the end of the socket once, with whatever the server bothered to say. */
+  private reportEnded(event?: { code?: number; reason?: string }): void {
+    if (this.endedReported || this.closingSocket) return;
+    this.endedReported = true;
+    this.handlers.onConnectionEnded?.({
+      code: Number(event?.code ?? 0),
+      reason: typeof event?.reason === "string" ? event.reason : "",
+      everConnected: this.everConnected,
+    });
   }
 
   private route(event: { data: unknown }): void {
