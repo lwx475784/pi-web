@@ -1,3 +1,4 @@
+<!-- status: done in bf1c643 (serial ask: `{state:"conflict"}` + `when_busy="queue"`) -->
 # 03 · 串行撞车判定与话术
 
 **问题**：允许多条同时在飞时，排进队列的那些（`queued`）天生没有身份，只能降级成"待读不播报"。

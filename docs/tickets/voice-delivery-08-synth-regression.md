@@ -1,3 +1,4 @@
+<!-- status: pending — needs the rebuilt server, then `node e2e/voice-delivery.mjs` -->
 # 08 · 20 条合成语音自动回归（宣布"生产可用"的门槛）
 
 **问题**：ADR 第 11 条要求错配率 <5 %，但真机人工念 20 条不可重复，也没法当基线。

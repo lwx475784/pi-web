@@ -1,3 +1,4 @@
+<!-- status: done in 3a37330 (server ledger, pill count, replay-on-open, read receipt on injection) -->
 # 02 · 服务端待读账本 + 药丸计数
 
 **问题**：漏播现在是静默的 —— 答案落在页面，语音侧一句不说；且逐字记录只活在浏览器

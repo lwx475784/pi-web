@@ -100,7 +100,7 @@ function localApiFetch(input: string, init?: RequestInit): Promise<Response> {
  * away and announces a failure for a run that answered moments later. This cap
  * is a guard for a wedged run, not a budget for a normal one.
  */
-const ANSWER_WAIT_MS = 20 * 60_000;
+export const ANSWER_WAIT_MS = 20 * 60_000;
 
 /**
  * How long the poll keeps trying after pi's run-end event failed to arrive. The event is the

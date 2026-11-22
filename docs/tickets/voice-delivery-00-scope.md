@@ -1,3 +1,4 @@
+<!-- status: roadmap for the gate group; 01–07 landed, 08 waits for the rebuilt server -->
 # 语音通话 · 门槛组范围（roadmap 替代表）
 
 定位：**pi 的正式派活入口**（生产），合格线是送达契约，不是功能齐面。决策依据见 `docs/adr/0008-voice-call-delivery-and-device-ownership.md`，

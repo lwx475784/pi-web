@@ -1,3 +1,4 @@
+<!-- status: done with 01–06: 58 new tests; the fake world now returns `state`, so the idle gate is finally exercised; `ANSWER_WAIT_MS` pinned -->
 # 07 · 夹具测试 + 补假世界缺 `state`
 
 **问题**：现有 62 条测试从没执行过真正的 idle 门控 —— `lib/voice/pi-bridge.test.mjs` 的

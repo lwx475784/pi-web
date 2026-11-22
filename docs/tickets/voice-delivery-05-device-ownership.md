@@ -1,3 +1,4 @@
+<!-- status: done in bf1c643 (voice lease with takeover, `onConnectionEnded`, mic released on a dead socket) -->
 # 05 · 设备接管提示 + onclose 可见 + watchdog
 
 **问题**：s2s 只有 1 条 pipeline（实测 `GET /v1/pool` = `{"size":1,"in_use":0}`），第二路直接

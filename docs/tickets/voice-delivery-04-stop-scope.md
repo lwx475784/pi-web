@@ -1,3 +1,4 @@
+<!-- status: done in bf1c643 (`stop_pi` scopes: ask / announcements / everything+confirm) -->
 # 04 · stop_pi 只停语音那条
 
 **问题**：语音说"算了"今天会 abort 整个 run 并 `clearQueue()` 清空**全部** steer/followUp 队列

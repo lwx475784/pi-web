@@ -1,3 +1,4 @@
+<!-- status: done in 54dcd80 (requestId + SSE run-end watcher + `pi-voice-events=0` fallback switch) -->
 # 01 · requestId 归因 + SSE 事件驱动（门槛组地基）
 
 **问题**：播报靠"leafId 变了 + 有非空 assistant 文本"猜答案归属，认不出就把别人的答案当成本题念出来。

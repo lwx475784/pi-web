@@ -1,3 +1,4 @@
+<!-- status: done in f1ba6fc (`flushSpeakingTurn` before capture stops) -->
 # 06 · 停麦前补静音收尾
 
 **问题**：服务端 turn 收尾只看**音频时钟**（`VADIterator` 按样本数判 300 ms 静音，
