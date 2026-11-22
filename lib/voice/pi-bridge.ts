@@ -73,12 +73,26 @@ function localApiFetch(input: string, init?: RequestInit): Promise<Response> {
 }
 
 /**
+ * How long a voice job keeps waiting for pi's answer.
+ *
+ * `ask_pi` answers the voice layer at once, so this wait costs no turn: it only
+ * decides when a finished answer stops being announced. A voice ask fans out
+ * into a real agent run — tool calls, subagents, a long reply. The first one
+ * measured 219 s end to end, so anything near three minutes throws the answer
+ * away and announces a failure for a run that answered moments later. This cap
+ * is a guard for a wedged run, not a budget for a normal one.
+ */
+const ANSWER_WAIT_MS = 20 * 60_000;
+
+/**
  * Send `question` as a pi prompt to `sessionId` and wait (poll) for the next
- * assistant answer. Rejects if pi never gets idle with new output in time, or
- * when `signal` aborts.
+ * assistant answer. A prompt that lands mid-run is queued as a follow-up, and
+ * the answer is announced when pi settles — minutes later if that is what the
+ * run takes. Rejects only when pi never settles with new output before
+ * `ANSWER_WAIT_MS` (or `timeoutMs`), or when `signal` aborts.
  */
 export async function askPiReply(sessionId: string, question: string, opts: AskPiOptions = {}): Promise<string> {
-  const timeoutMs = opts.timeoutMs ?? 180_000;
+  const timeoutMs = opts.timeoutMs ?? ANSWER_WAIT_MS;
   const pollMs = opts.pollMs ?? 1200;
   const call = opts.fetchImpl ?? localApiFetch;
   const enc = encodeURIComponent(sessionId);
@@ -92,16 +106,25 @@ export async function askPiReply(sessionId: string, question: string, opts: AskP
   } catch { /* best-effort baseline */ }
   if (aborted()) throw new PiRequestCancelled();
 
-  const res = await call(`/api/agent/${enc}`, {
+  const post = (body: Record<string, unknown>) => call(`/api/agent/${enc}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "prompt", message: question }),
+    body: JSON.stringify(body),
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
+  let res = await post({ type: "prompt", message: question });
   if (aborted()) throw new PiRequestCancelled();
-  const sent = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+  let sent = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
   if (!res.ok || sent.error) {
-    throw new Error(sent.code === "prompt_rejected" ? "pi is busy" : (sent.error ?? `pi send failed (HTTP ${res.status})`));
+    if (sent.code !== "prompt_rejected") throw new Error(sent.error ?? `pi send failed (HTTP ${res.status})`);
+    // pi is mid-run. Its SDK refuses a bare prompt while a run streams ("Agent
+    // is already processing. Specify streamingBehavior"), but a follow-up joins
+    // that run's queue and answers on its next turn — what the composer does
+    // with a message typed during a run. Queue it; do not tell the user busy.
+    res = await post({ type: "prompt", message: question, streamingBehavior: "followUp" });
+    if (aborted()) throw new PiRequestCancelled();
+    sent = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+    if (!res.ok || sent.error) throw new Error("pi is busy");
   }
 
   const deadline = Date.now() + timeoutMs;
