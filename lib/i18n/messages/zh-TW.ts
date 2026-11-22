@@ -851,6 +851,7 @@ export const zhTWLocale: LocalePlugin = {
     "voiceCall.occupied": "語音正被 {holder} 使用",
     "voiceCall.takeover": "語音已交給 {holder}",
     "voiceCall.disconnected": "語音連接已斷開",
+    "voiceCall.stalled": "語音服務不再回應，這通電話結束了",
     "chat.previewImage": "預覽圖片",
     "chat.filterModels": "篩選模型…",
     "chat.modelScopeScoped": "已限定",

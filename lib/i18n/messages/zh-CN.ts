@@ -851,6 +851,7 @@ export const zhCNLocale: LocalePlugin = {
     "voiceCall.occupied": "语音正被 {holder} 使用",
     "voiceCall.takeover": "语音已交给 {holder}",
     "voiceCall.disconnected": "语音连接已断开",
+    "voiceCall.stalled": "语音服务不再回应，这通电话结束了",
     "chat.previewImage": "预览图片",
     "chat.filterModels": "筛选模型…",
     "chat.modelScopeScoped": "已限定",

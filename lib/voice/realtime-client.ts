@@ -84,6 +84,11 @@ export interface RealtimeClientOptions {
    * that goes silent in the middle of a tool run looks like.
    */
   gateResponses?: boolean;
+  /**
+   * How long a `response.create` may wait for its `response.created` before it is counted as
+   * lost. Omitted: `CREATE_ACK_TIMEOUT_MS`.
+   */
+  createAckTimeoutMs?: number;
 }
 
 const SILENCE_CHUNK_B64 = "AA".repeat(3200); // 100 ms of 16 kHz mono PCM16
@@ -100,6 +105,16 @@ const RETRYABLE_CREATE_ERRORS = new Set([
   "function_call_output_pending",
   "conversation_already_has_active_response",
 ]);
+
+/**
+ * A `response.create` the server neither opens nor refuses. The two refusal codes the client
+ * knows about are handled where they arrive, but an unknown code — or a socket that is half
+ * gone — used to leave `createOpen` true forever, parking every later announcement behind a
+ * reply that was never coming. A timeout turns that deadlock into a retry (ADR 0008 #11).
+ */
+const CREATE_ACK_TIMEOUT_MS = 8_000;
+/** Consecutive lost creates before the call is declared stalled instead of retried forever. */
+const CREATE_STALL_LIMIT = 3;
 
 export function toBase64(bytes: Uint8Array): string {
   if (typeof Buffer !== "undefined") return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
@@ -133,6 +148,9 @@ export class RealtimeDictationClient {
   private closingSocket = false;
   /** Waiting for the sentence in flight to end (see `flushSpeakingTurn`). */
   private readonly speakingWaiters: Array<() => void> = [];
+  /** The `response.create` that has not been acknowledged, and how many in a row went unanswered. */
+  private createTimer: ReturnType<typeof setTimeout> | null = null;
+  private createStalls = 0;
   /** Out-of-band announcements to speak, oldest first, each with the tag its caller asked back. */
   private readonly notices: { text: string; tag: string }[] = [];
   /** The user is mid-sentence: hold an announcement until they finish. */
@@ -289,6 +307,7 @@ export class RealtimeDictationClient {
     this.owed = false;
     this.createOpen = true;
     this.sendEvent({ type: "response.create" });
+    this.armCreateTimer();
   }
 
   sendAudio(base64Pcm16: string): void {
@@ -343,7 +362,36 @@ export class RealtimeDictationClient {
     // A hang-up is not an outage: the close it causes must not report a lost call.
     this.closingSocket = true;
     this.releaseSpeakingWaiters();
+    this.clearCreateTimer();
     try { ws?.close(); } catch { /* already closed */ }
+  }
+
+  private armCreateTimer(): void {
+    this.clearCreateTimer();
+    this.createTimer = setTimeout(() => this.onCreateStalled(), this.opts.createAckTimeoutMs ?? CREATE_ACK_TIMEOUT_MS);
+  }
+
+  private clearCreateTimer(): void {
+    if (this.createTimer !== null) {
+      clearTimeout(this.createTimer);
+      this.createTimer = null;
+    }
+  }
+
+  /** A create nobody answered: put the reply back on the books, and try again when the way clears. */
+  private onCreateStalled(): void {
+    this.createTimer = null;
+    if (!this.createOpen) return;
+    this.createOpen = false;
+    this.owed = true;
+    this.createStalls += 1;
+    if (this.createStalls >= CREATE_STALL_LIMIT) {
+      // Three lost creates in a row is not a race: the server stopped answering. Say so, instead
+      // of a call that looks live and is only deaf (the review's 假在线).
+      this.handlers.onError?.({ code: "connection_stalled", message: "voice server stopped answering" });
+      return;
+    }
+    this.replyWhenClear();
   }
 
   /** Report the end of the socket once, with whatever the server bothered to say. */
@@ -415,6 +463,8 @@ export class RealtimeDictationClient {
       case "response.created": {
         this.inResponse = true;
         this.createOpen = false;
+        this.clearCreateTimer();
+        this.createStalls = 0;
         this.handlers.onResponseStarted?.();
         // Dictation does not want the assistant's reply: cancel it as soon as
         // it opens so no audio is synthesized and no history is kept.
@@ -446,6 +496,7 @@ export class RealtimeDictationClient {
       case "response.done": {
         this.inResponse = false;
         this.createOpen = false;
+        this.clearCreateTimer();
         const response = (msg.response ?? {}) as Record<string, unknown>;
         this.handlers.onResponseDone?.(String(response.status ?? "completed"));
         this.replyWhenClear();
@@ -458,6 +509,7 @@ export class RealtimeDictationClient {
           // Nothing opened, so the reply is still owed: retry once the reason
           // for the refusal is gone.
           this.createOpen = false;
+          this.clearCreateTimer();
           this.owed = true;
         }
         if (code === "session_limit_reached") {

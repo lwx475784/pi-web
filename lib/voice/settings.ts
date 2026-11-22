@@ -61,10 +61,24 @@ export function setRealtimeUrl(url: string, storage: ItemStorage | null = browse
   }
 }
 
-/** Candidate WebSocket URLs in attempt order. */
+/**
+ * Candidate WebSocket URLs in attempt order.
+ *
+ * A page served over `https:` never gets the plaintext candidate: browsers
+ * block `ws://` from a secure page as mixed content, so the attempt cannot
+ * work and it marks the whole tab "not secure" for that navigation. The LAN
+ * address stays in the list for `http://` pages (a phone on the hotspot,
+ * `npm run dev`). A single URL typed in Settings is honoured exactly as
+ * written, and a deployment whose defaults are all plaintext still tries
+ * them: an empty list would fail before anything reaches the wire.
+ */
 export function getRealtimeUrls(storage: ItemStorage | null = browserStorage()): string[] {
   const override = getRealtimeUrl(storage);
-  return override ? [override] : [...DEFAULT_REALTIME_URLS];
+  if (override) return [override];
+  const defaults = [...DEFAULT_REALTIME_URLS];
+  if (typeof location === "undefined" || location.protocol !== "https:") return defaults;
+  const secure = defaults.filter((url) => url.startsWith("wss://"));
+  return secure.length > 0 ? secure : defaults;
 }
 
 /**

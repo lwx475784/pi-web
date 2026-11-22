@@ -516,12 +516,17 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
       },
       onError: (e) => {
         if (disposed) return;
-        const fatal = e.code === "connection_error" || e.code === "session_limit_reached";
+        const fatal = e.code === "connection_error" || e.code === "session_limit_reached" || e.code === "connection_stalled";
         if (fatal) {
           setError(e.code === "session_limit_reached"
             ? tRef.current("voiceCall.occupied", { holder: "另一台设备" })
-            : e.message);
+            : e.code === "connection_stalled"
+              ? tRef.current("voiceCall.stalled")
+              : e.message);
           setStatus("error");
+          // Three unanswered creates, or a socket the server dropped: stop holding the microphone
+          // for a call that can no longer hear (ADR 0008 #7).
+          void stopCapture();
           return;
         }
         // One refused or failed reply: the client re-asks when the way clears.

@@ -38,8 +38,19 @@ const REALTIME = flag("realtime-url", process.env.PI_VOICE_REALTIME_URL || "ws:/
 const CWD = flag("cwd", process.cwd());
 const LIMIT = Math.max(1, Math.min(40, Number(flag("limit", "20"))));
 const REPORT = flag("report", "");
-const ASK_TIMEOUT_MS = Math.max(30_000, Number(flag("ask-timeout-ms", "180_000")));
+// `Number("180_000")` is NaN, and `Math.max(30_000, NaN)` is NaN too — which made every wait
+// expire instantly and every ask read back as "empty answer". Defaults are parsed from digits
+// only, and a NaN falls back rather than silently becoming a zero-timeout.
+const ASK_TIMEOUT_MS = (() => {
+  const raw = Number(flag("ask-timeout-ms", "180000"));
+  return Number.isFinite(raw) && raw > 0 ? Math.max(30_000, raw) : 180_000;
+})();
 const SPEECH = has("speech");
+
+/** Tokens of the asks already put: an answer carrying one of these is somebody else's. */
+function earlierTokens(index) {
+  return Array.from({ length: index }, (_, i) => scriptedAsk(i).token);
+}
 
 /** One ask per row. The token is what makes a wrong answer detectable without a human listening. */
 function scriptedAsk(index) {
@@ -73,12 +84,15 @@ const post = (path, body) => api(path, {
 function openEventStream(sessionId) {
   const controller = new AbortController();
   const listeners = new Set();
+  const state = { connected: false, error: null };
   void (async () => {
     const res = await fetch(`${BASE}/api/agent/${encodeURIComponent(sessionId)}/events`, { signal: controller.signal });
     if (!res.ok || !res.body) {
-      listeners.forEach((fire) => fire({ type: "stream_error", status: res.status }));
+      state.error = `http ${res.status}`;
+      for (const listener of listeners) listener({ type: "stream_error", status: res.status });
       return;
     }
+    state.connected = true;
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -101,6 +115,7 @@ function openEventStream(sessionId) {
     }
   })().catch(() => { /* aborted */ });
   return {
+    state,
     onEvent(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     close() { controller.abort(); listeners.clear(); },
   };
@@ -291,12 +306,19 @@ async function main() {
   const sessionId = created.sessionId;
   if (!sessionId) throw new Error(`/api/agent/new returned no sessionId: ${JSON.stringify(created).slice(0, 200)}`);
   const stream = openEventStream(sessionId);
-  await sleep(300);
+  await sleep(1500);
+  if (!stream.state.connected) stream.state.error = stream.state.error ?? "never connected";
 
   console.log(`pi-web ${BASE} · session ${sessionId} · ${LIMIT} asks${SPEECH ? " · speech leg on" : ""}`);
   const ledger = await ledgerSmoke(sessionId).catch((error) => ({ error: String(error) }));
 
   for (let index = 0; index < LIMIT; index++) {
+    if (stream.state.error) {
+      // Without the run-end events there is nothing to pair against, and posting anyway is how
+      // the first run of this script turned one dead stream into a cascade of 500s.
+      rows.push({ token: scriptedAsk(index).token, verdict: `stream-lost (${stream.state.error})`, paired: false, ms: 0, chars: 0 });
+      continue;
+    }
     const ask = scriptedAsk(index);
     const requestId = randomUUID();
     const began = Date.now();
@@ -304,19 +326,30 @@ async function main() {
     let answer = "";
     let paired = false;
     try {
-      const sent = await post(`/api/agent/${encodeURIComponent(sessionId)}`, { type: "prompt", message: `${ask.text}`, requestId });
-      if (sent?.error) throw new Error(`prompt rejected: ${sent.error}`);
-      const ended = await awaitRun(stream, requestId, ASK_TIMEOUT_MS);
-      if (!ended.ok) { verdict = ended.reason === "timeout" ? "no-run-end-event" : "stream-lost"; }
-      answer = await readNewestAnswer(sessionId);
-      paired = answer.includes(ask.token);
-      if (!answer) verdict = "empty-answer";
-      else if (ended.ok && !paired) verdict = "mis-paired";
-      else if (!ended.ok) verdict = `${verdict}${paired ? " (answer found anyway)" : ""}`;
+      const sent = await post(`/api/agent/${encodeURIComponent(sessionId)}`, { type: "prompt", message: ask.text, requestId });
+      if (sent?.error) {
+        verdict = `prompt-rejected: ${String(sent.error).slice(0, 60)}`;
+      } else {
+        const ended = await awaitRun(stream, requestId, ASK_TIMEOUT_MS);
+        answer = await readNewestAnswer(sessionId);
+        paired = answer.includes(ask.token);
+        // Mis-pairing is the delivery failure ADR 0008 gates on: an answer that belongs to
+        // *another* ask. A correct answer that merely did not repeat its token is a phrasing
+        // miss ("unconfirmed") which the panel would still speak truthfully — counted, but it
+        // does not consume the mis-pairing budget.
+        const staleOf = earlierTokens(index).find((token) => !paired && answer.includes(token)) ?? null;
+        if (!ended.ok) verdict = ended.reason === "timeout" ? "no-run-end-event" : "stream-lost";
+        else if (!answer) verdict = "empty-answer";
+        else if (staleOf) verdict = `mis-paired (answer of ${staleOf})`;
+        else if (!paired) verdict = "unconfirmed";
+      }
     } catch (error) {
       verdict = `error: ${String(error).slice(0, 80)}`;
     }
-    rows.push({ token: ask.token, verdict, paired, ms: Date.now() - began, chars: answer.length });
+    rows.push({
+      token: ask.token, verdict, paired, ms: Date.now() - began, chars: answer.length,
+      answer: answer.slice(0, 60).replace(/\s+/g, " "),
+    });
     console.log(`  ${ask.token} ${verdict.padEnd(24)} ${String(Date.now() - began).padStart(6)} ms`);
   }
 
@@ -336,7 +369,8 @@ async function main() {
   stream.close();
 
   const answered = rows.filter((row) => row.paired).length;
-  const misPaired = rows.filter((row) => row.verdict === "mis-paired").length;
+  const misPaired = rows.filter((row) => row.verdict.startsWith("mis-paired")).length;
+  const unconfirmed = rows.filter((row) => row.verdict === "unconfirmed").length;
   const rate = rows.length ? (misPaired / rows.length) * 100 : 100;
   const latencies = rows.map((row) => row.ms).sort((a, b) => a - b);
   const percentile = (p) => (latencies.length ? latencies[Math.min(latencies.length - 1, Math.ceil((p / 100) * latencies.length) - 1)] : 0);
@@ -347,14 +381,14 @@ async function main() {
     "# 语音送达回归",
     "",
     `- server: \`${BASE}\` · session \`${sessionId}\` · ${new Date().toISOString()}`,
-    `- asks: ${rows.length} · 配对正确 ${answered} · 错配 ${misPaired} (${rate.toFixed(1)} %) · 门槛 < 5 %`,
+    `- asks: ${rows.length} · 配对正确 ${answered} · 错配 ${misPaired} (${rate.toFixed(1)} %) · 门槛 < 5 % · 未复述编号 ${unconfirmed}`,
     `- pi 侧每问耗时: P50 ${percentile(50)} ms · P90 ${percentile(90)} ms · 最长 ${latencies.at(-1) ?? 0} ms`,
     `- ledger: ${JSON.stringify(ledger)}`,
     SPEECH ? `- 说完→首个音频帧 (合成语音, n=${speechLatencies.length}): P50 ${speechPercentile(50) ?? "n/a"} ms · P90 ${speechPercentile(90) ?? "n/a"} ms` : "- speech leg: off (--speech)",
     "",
-    "| token | 判定 | 配对 | 用时 |",
-    "|---|---|---|---|",
-    ...rows.map((row) => `| ${row.token} | ${row.verdict} | ${row.paired ? "✓" : "✗"} | ${row.ms} ms |`),
+    "| token | 判定 | 配对 | 用时 | 答案开头 |",
+    "|---|---|---|---|---|",
+    ...rows.map((row) => `| ${row.token} | ${row.verdict} | ${row.paired ? "✓" : "✗"} | ${row.ms} ms | ${(row.answer ?? "").replace(/\|/g, "\\|").slice(0, 40)} |`),
     ...(speechRows.length ? ["", "| token | 转写 | ask_pi 里的问题 | 首音 |", "|---|---|---|---|",
       ...speechRows.map((row) => `| ${row.token} | ${(row.transcript ?? row.error ?? "").replace(/\|/g, "\\|").slice(0, 40)} | ${(row.tool ?? "").replace(/\|/g, "\\|").slice(0, 40)} | ${row.firstAudioMs ?? "—"} |`)] : []),
     "",
