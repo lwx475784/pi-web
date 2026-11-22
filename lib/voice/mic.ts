@@ -3,6 +3,8 @@
 // The Realtime server resamples anyway; 16 kHz keeps the WebSocket light and
 // matches what every OpenAI Realtime client sends.
 
+import type { NearGateHandle } from "./turn-gate";
+
 const TARGET_RATE = 16000;
 const WORKLET_URL = "/voice/pcm-worklet.js";
 
@@ -39,11 +41,23 @@ export interface MicHandle {
   stop(): Promise<void>;
 }
 
+export interface MicCaptureOptions {
+  /**
+   * Loudness gate applied to every frame. A closed gate still emits a frame —
+   * silence of the same length — so the server's VAD keeps seeing real gaps and
+   * ends its turns instead of waiting for audio that never comes.
+   */
+  gate?: NearGateHandle;
+}
+
 /**
  * Start capture; `onChunk` receives ~100 ms base64 PCM16 16 kHz frames. The
  * caller must invoke this from a user gesture (iOS Safari requirement).
  */
-export async function startMicCapture(onChunk: (base64Pcm16: string) => void): Promise<MicHandle> {
+export async function startMicCapture(
+  onChunk: (base64Pcm16: string) => void,
+  opts: MicCaptureOptions = {},
+): Promise<MicHandle> {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
@@ -74,7 +88,13 @@ export async function startMicCapture(onChunk: (base64Pcm16: string) => void): P
   const node = new AudioWorkletNode(ctx, "pcm-capture");
   node.port.onmessage = (event: MessageEvent<Float32Array>) => {
     const resampled = resampleToRate(event.data, ctx.sampleRate);
-    onChunk(floatToInt16Base64(resampled));
+    const frame = floatToInt16Base64(resampled);
+    const gate = opts.gate;
+    if (!gate) {
+      onChunk(frame);
+      return;
+    }
+    for (const uploaded of gate.push(resampled, frame)) onChunk(uploaded);
   };
   const mute = ctx.createGain();
   mute.gain.value = 0;

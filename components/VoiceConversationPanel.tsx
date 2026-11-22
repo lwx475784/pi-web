@@ -5,9 +5,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { RealtimeDictationClient } from "@/lib/voice/realtime-client";
 import { startMicCapture, type MicHandle } from "@/lib/voice/mic";
 import { createAudioOut, type AudioOutHandle } from "@/lib/voice/audio-out";
-import { getRealtimeUrls } from "@/lib/voice/settings";
-import { askPiReply } from "@/lib/voice/pi-bridge";
-import { appendCallTurn, buildReplayMessage, loadCallHistory, type CallTurn } from "@/lib/voice/call-history";
+import { getGateSensitivity, getRealtimeUrls, getWakeWord } from "@/lib/voice/settings";
+import { classifyTurn, createNearSpeechGate } from "@/lib/voice/turn-gate";
+import { askPiReply, isPiRequestCancelled, stopPiRun } from "@/lib/voice/pi-bridge";
+import { appendCallTurn, buildReplayMessage, loadCallHistory, migrateCallHistory, type CallTurn } from "@/lib/voice/call-history";
 import { useI18n } from "@/hooks/useI18n";
 
 interface Caption {
@@ -15,12 +16,22 @@ interface Caption {
   who: "me" | "ai" | "pi";
   text: string;
   live?: boolean;
+  /** Background speech the gates swallowed: shown, never answered, never remembered. */
+  ignored?: boolean;
+}
+
+/** A question handed to pi; its answer arrives later, if the user lets it. */
+interface PiJob {
+  question: string;
+  captionId: number;
+  controller: AbortController;
+  cancelled: boolean;
 }
 
 const ASK_PI_TOOL = {
   type: "function",
   name: "ask_pi",
-  description: "Ask the pi coding agent working in this folder: their files, memory, projects, tools, history, or any task that takes real work. Returns pi's answer. Say one short acknowledgement first, in the user's own language.",
+  description: "Hand work to the pi coding agent in this folder: their files, memory, projects, tools, history, or any task that takes real work. It answers seconds or minutes later, never inside this call: the result arrives as a message marked [background event].",
   parameters: {
     type: "object",
     properties: { question: { type: "string", description: "The request rephrased as fluent text in the language the user spoke, with speech-to-text errors fixed. Never translate it into another language." } },
@@ -28,30 +39,57 @@ const ASK_PI_TOOL = {
   },
 };
 
+const STOP_PI_TOOL = {
+  type: "function",
+  name: "stop_pi",
+  description: "Stop the work pi is doing for the user because they cancelled it — they said to forget it, stop, or that the answer is no longer wanted. Takes no argument and returns at once; the answer will not arrive.",
+  parameters: { type: "object", properties: {}, required: [] },
+};
+
 // Model-facing copy (not UI): stable across locales, the voice layer always
 // speaks Chinese to match the household's use.
 const VOICE_LAYER_INSTRUCTIONS = [
   "You are the user's realtime voice assistant inside Pi Web.",
-  "For anything about their files, memory, projects, tools, or longer work, call ask_pi; before the call say one brief acknowledgement in Chinese.",
+  "For anything about their files, memory, projects, tools, or longer work, call ask_pi.",
+  "ask_pi only starts the job and returns at once: after the call say one short line in Chinese that you asked pi, then keep listening — never wait for the answer.",
+  "A message marked [background event] comes from pi, not the user: tell the user briefly in your own words what it found.",
+  "If the user says to stop or forget what pi is looking up, call stop_pi.",
   "Answer greetings and small talk yourself.",
-  "Always reply in Chinese, at most two short sentences; the answer of ask_pi is spoken back to the user in your own words.",
+  "Always reply in Chinese, at most two short sentences.",
   "The user's speech is auto-transcribed and may contain wrong words; silently fix them when calling ask_pi and keep the user's own language.",
 ].join(" ");
 
+interface Props {
+  /** What the call's transcript is stored under: the session, or the fresh composer's draft key. */
+  callKey: string;
+  /** The session pi runs in, when this page has one yet. */
+  sessionId: string | null;
+  /** Create (and promote) the page's session, for the first question that needs pi. */
+  onEnsureSession: () => Promise<string | null>;
+  onClose: () => void;
+}
+
 /**
- * Two-layer realtime voice call. Collapsing hides the panel but keeps the
- * call live (mic, barge-in, audio out run on); the pill restores the scene at
- * once. The transcript and a bounded context digest persist per session, so
- * re-opening later — even after a reload — resumes where the last call was.
+ * Two-layer realtime voice call. The voice layer answers small talk itself and
+ * hands real work to pi: `ask_pi` starts the job and is answered at once, so a
+ * long pi run never blocks the conversation, and its result is announced as a
+ * background event when the user next stops talking. `stop_pi` drops a job the
+ * user no longer wants — that is what a spoken "算了" interrupts.
+ *
+ * Collapsing hides the panel but keeps the call live (mic, barge-in, audio out
+ * run on); the pill restores the scene at once. The transcript and a bounded
+ * context digest persist per session, so re-opening later — even after a
+ * reload — resumes where the last call was.
  */
-export function VoiceConversationPanel({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
+export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, onClose }: Props) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(false);
   const [status, setStatus] = useState<"connecting" | "live" | "error">("connecting");
   const [error, setError] = useState("");
+  // One reply the voice layer could not generate: it costs a turn, not the call.
+  const [warning, setWarning] = useState("");
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [piBusy, setPiBusy] = useState(false);
-  const startedRef = useRef(false);
   const clientRef = useRef<RealtimeDictationClient | null>(null);
   const micRef = useRef<MicHandle | null>(null);
   const audioRef = useRef<AudioOutHandle | null>(null);
@@ -60,26 +98,154 @@ export function VoiceConversationPanel({ sessionId, onClose }: { sessionId: stri
   const meIdRef = useRef(0);
   const aiIdRef = useRef(0);
   const aiTextRef = useRef("");
+  const jobsRef = useRef(new Map<string, PiJob>());
+  /** Where pi runs and where the transcript lives, once a session exists. */
+  const sessionRef = useRef<string | null>(sessionId);
+  const historyKeyRef = useRef(sessionId ?? callKey);
+  const tRef = useRef(t);
+  tRef.current = t;
 
   const persist = useCallback((who: CallTurn["who"], text: string) => {
-    appendCallTurn(sessionId, { who, text });
-  }, [sessionId]);
+    appendCallTurn(historyKeyRef.current, { who, text });
+  }, []);
 
+  /** Materialise the page's session on the first question that needs pi. */
+  const ensureSession = useCallback(async (): Promise<string | null> => {
+    if (sessionRef.current) return sessionRef.current;
+    const id = await onEnsureSession();
+    if (id && sessionRef.current === null) {
+      sessionRef.current = id;
+      if (historyKeyRef.current !== id) {
+        migrateCallHistory(historyKeyRef.current, id);
+        historyKeyRef.current = id;
+      }
+    }
+    return id;
+  }, [onEnsureSession]);
+  const ensureSessionRef = useRef(ensureSession);
+  ensureSessionRef.current = ensureSession;
+
+  /** Drop every job the voice layer started: no answer, no announcement. */
+  const stopPiJobs = useCallback(() => {
+    const jobs = [...jobsRef.current.values()];
+    jobsRef.current.clear();
+    setPiBusy(false);
+    clientRef.current?.dropNotifications();
+    const sid = sessionRef.current;
+    if (sid && jobs.length) void stopPiRun(sid);
+    for (const job of jobs) {
+      job.cancelled = true;
+      job.controller.abort();
+      setCaptions((prev) => prev.map((c) => (c.id === job.captionId
+        ? { ...c, text: `${c.text.replace(/^… /, "")}（${tRef.current("voiceCall.cancelled")}）` }
+        : c)));
+    }
+  }, []);
+  const stopPiJobsRef = useRef(stopPiJobs);
+  stopPiJobsRef.current = stopPiJobs;
+
+  /** Hand one question to pi, and announce its answer whenever it lands. */
+  const startPiJob = useCallback((callId: string, question: string) => {
+    const controller = new AbortController();
+    const captionId = seqRef.current++;
+    jobsRef.current.set(callId, { question, captionId, controller, cancelled: false });
+    setPiBusy(true);
+    setCaptions((prev) => [...prev, { id: captionId, who: "pi", text: `… ${question}` }]);
+    void (async () => {
+      // The call is answered before pi starts: while a function call is open the
+      // voice layer cannot generate anything, so waiting on pi is what silence
+      // the user hears as "it cannot be interrupted".
+      clientRef.current?.sendFunctionOutput(callId, JSON.stringify({ state: "started", question }), true);
+      let answer: string;
+      let failed = false;
+      try {
+        const sid = await ensureSessionRef.current();
+        if (!sid) throw new Error("no session to ask pi in");
+        answer = await askPiReply(sid, `[语音通话] ${question}`, { signal: controller.signal });
+      } catch (e) {
+        if (isPiRequestCancelled(e)) return; // the user stopped it: nothing to say
+        failed = true;
+        answer = `pi: ${(e as Error)?.message ?? "failed"}`;
+      }
+      const job = jobsRef.current.get(callId);
+      if (!job || job.cancelled) return;
+      jobsRef.current.delete(callId);
+      if (jobsRef.current.size === 0) setPiBusy(false);
+      setCaptions((prev) => prev.map((c) => (c.id === captionId ? { ...c, text: answer } : c)));
+      if (failed) setWarning(answer);
+      else persistRef.current("pi", answer);
+      // Model-facing: the voice layer says it in its own words.
+      clientRef.current?.notify(failed
+        ? `pi 没能回答「${question}」：${answer.replace(/^pi: /, "")}`
+        : `pi 对「${question}」的回答：${answer}`);
+    })();
+  }, []);
+  const startPiJobRef = useRef(startPiJob);
+  startPiJobRef.current = startPiJob;
+
+  const upsertLive = useCallback((who: "me" | "ai", text: string) => {
+    setCaptions((prev) => {
+      const idRef = who === "me" ? meIdRef : aiIdRef;
+      const existing = prev.find((c) => c.id === idRef.current);
+      if (!existing) {
+        const id = seqRef.current++;
+        idRef.current = id;
+        return [...prev, { id, who, text, live: true }];
+      }
+      return prev.map((c) => (c.id === idRef.current ? { ...c, text } : c));
+    });
+  }, []);
+
+  const finalizeLive = useCallback((who: "me" | "ai", text?: string) => {
+    setCaptions((prev) => prev.map((c) => (c.id === (who === "me" ? meIdRef : aiIdRef).current ? { ...c, live: false, text: text ?? c.text } : c)));
+    (who === "me" ? meIdRef : aiIdRef).current = 0;
+  }, []);
+
+  // Effects below run before these callbacks exist on first render; refs keep
+  // the once-only call closure pointed at the latest versions.
+  const upsertLiveRef = useRef(upsertLive);
+  upsertLiveRef.current = upsertLive;
+  const finalizeLiveRef = useRef(finalizeLive);
+  finalizeLiveRef.current = finalizeLive;
+  const persistRef = useRef(persist);
+  persistRef.current = persist;
+
+  // One run per mount: the session id appears in the middle of a call (the first
+  // question that needs pi), and depending on it would hang up. Dev mode mounts,
+  // unmounts and mounts again, so the socket closes with its mount — the server
+  // keeps one client per pipeline slot, and the retry needs it free.
   useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
+    historyKeyRef.current = sessionRef.current ?? callKey;
+    const jobs = jobsRef.current;
 
     // Restore the previous scene first: the transcript shows while connecting.
-    const history = loadCallHistory(sessionId);
+    const history = loadCallHistory(historyKeyRef.current);
     setCaptions(history.map((h) => ({ id: seqRef.current++, who: h.who, text: h.text })));
 
     const audioOut = createAudioOut();
     audioRef.current = audioOut;
     let disposed = false;
+    // Both gates read their settings when the call starts, so a change lands on
+    // the next call rather than half-way through this one.
+    const gate = createNearSpeechGate({ sensitivity: getGateSensitivity() });
+    const wakeWord = getWakeWord();
     const client = new RealtimeDictationClient(getRealtimeUrls(), {
       onPartial: (text) => { if (text) upsertLiveRef.current("me", text); },
-      onSegment: (text) => { finalizeLiveRef.current("me", text); persistRef.current("me", text); },
+      onSegment: (text, info) => {
+        const live = meIdRef.current;
+        finalizeLiveRef.current("me", text);
+        if (info.accepted) {
+          persistRef.current("me", text);
+          return;
+        }
+        // Show what was swallowed: it is how the sensitivity slider gets tuned.
+        const id = live || seqRef.current++;
+        if (!live) setCaptions((prev) => [...prev, { id, who: "me", text }]);
+        setCaptions((prev) => prev.map((c) => (c.id === id ? { ...c, ignored: true } : c)));
+      },
+      acceptTurn: (text, seconds) => classifyTurn(text, seconds, { wakeWord }).accept,
       onSpeechStarted: () => audioOut.flush(),
+      onResponseStarted: () => setWarning(""),
       onAssistantDelta: (d) => {
         aiTextRef.current += d;
         setCaptions((prev) => {
@@ -101,31 +267,34 @@ export function VoiceConversationPanel({ sessionId, onClose }: { sessionId: stri
       onFunctionCall: ({ callId, name, argumentsJson }) => {
         let question = "";
         try { question = String((JSON.parse(argumentsJson) as { question?: string }).question ?? ""); } catch { /* fall through */ }
+        if (name === "stop_pi") {
+          stopPiJobsRef.current();
+          client.sendFunctionOutput(callId, "ok: pi stopped, nothing more is coming", true);
+          return;
+        }
         if (name !== "ask_pi" || !question) {
           client.sendFunctionOutput(callId, `unknown tool call ${name}`, false);
           return;
         }
-        setPiBusy(true);
-        const id = seqRef.current++;
-        setCaptions((prev) => [...prev, { id, who: "pi", text: `… ${question}` }]);
-        void askPiReply(sessionId, `[语音通话] ${question}`)
-          .then((answer) => {
-            setCaptions((prev) => [...prev.map((c) => (c.id === id ? { ...c, text: answer } : c))]);
-            persistRef.current("pi", answer);
-            if (!disposed) client.sendFunctionOutput(callId, answer);
-          })
-          .catch((e: Error) => {
-            setCaptions((prev) => [...prev.map((c) => (c.id === id ? { ...c, text: `pi: ${e.message}` } : c))]);
-            if (!disposed) client.sendFunctionOutput(callId, `pi failed: ${e.message}`);
-          })
-          .finally(() => { if (!disposed) setPiBusy(false); });
+        startPiJobRef.current(callId, question);
       },
       onError: (e) => {
         if (disposed) return;
-        setError(e.message);
-        setStatus("error");
+        const fatal = e.code === "connection_error" || e.code === "session_limit_reached";
+        if (fatal) {
+          setError(e.message);
+          setStatus("error");
+          return;
+        }
+        // One refused or failed reply: the client re-asks when the way clears.
+        setWarning(e.message);
       },
-    }, { cancelResponses: false, tools: [ASK_PI_TOOL], instructions: VOICE_LAYER_INSTRUCTIONS });
+    }, {
+      cancelResponses: false,
+      gateResponses: true,
+      tools: [ASK_PI_TOOL, STOP_PI_TOOL],
+      instructions: VOICE_LAYER_INSTRUCTIONS,
+    });
     clientRef.current = client;
     void (async () => {
       try {
@@ -133,7 +302,7 @@ export function VoiceConversationPanel({ sessionId, onClose }: { sessionId: stri
         if (disposed) return;
         const replay = buildReplayMessage(history);
         if (replay) client.sendEvent({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text: replay }] } });
-        const mic = await startMicCapture((chunk) => client.sendAudio(chunk));
+        const mic = await startMicCapture((chunk) => client.sendAudio(chunk), { gate });
         if (disposed) {
           await mic.stop();
           return;
@@ -149,41 +318,20 @@ export function VoiceConversationPanel({ sessionId, onClose }: { sessionId: stri
     return () => {
       disposed = true;
       clientRef.current = null;
+      for (const job of jobs.values()) {
+        job.cancelled = true;
+        job.controller.abort();
+      }
+      jobs.clear();
       const mic = micRef.current;
       micRef.current = null;
       if (mic) void mic.stop().catch(() => undefined);
       const clientToClose = client;
-      setTimeout(() => clientToClose.close(), 300); // let any last tool output land
+      clientToClose.close(); // a hang-up keeps its transcript locally, not in the server's conversation
       audioOut.close();
     };
-  }, [sessionId]);
-
-  const upsertLive = useCallback((who: "me" | "ai", text: string) => {
-    setCaptions((prev) => {
-      const idRef = who === "me" ? meIdRef : aiIdRef;
-      const existing = prev.find((c) => c.id === idRef.current);
-      if (!existing) {
-        const id = seqRef.current++;
-        idRef.current = id;
-        return [...prev, { id, who, text, live: true }];
-      }
-      return prev.map((c) => (c.id === idRef.current ? { ...c, text } : c));
-    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const finalizeLive = useCallback((who: "me" | "ai", text?: string) => {
-    setCaptions((prev) => prev.map((c) => (c.id === (who === "me" ? meIdRef : aiIdRef).current ? { ...c, live: false, text: text ?? c.text } : c)));
-    (who === "me" ? meIdRef : aiIdRef).current = 0;
-  }, []);
-
-  // Effects above run before the callbacks below exist on first render; refs
-  // keep the once-only session closure pointed at the latest versions.
-  const upsertLiveRef = useRef(upsertLive);
-  upsertLiveRef.current = upsertLive;
-  const finalizeLiveRef = useRef(finalizeLive);
-  finalizeLiveRef.current = finalizeLive;
-  const persistRef = useRef(persist);
-  persistRef.current = persist;
 
   useEffect(() => {
     const el = listRef.current;
@@ -206,6 +354,18 @@ export function VoiceConversationPanel({ sessionId, onClose }: { sessionId: stri
       }}
     />
   );
+
+  const statusLine = status === "connecting"
+    ? t("voiceCall.connecting")
+    : status === "error"
+      ? t("voiceCall.error", { message: error })
+      : warning
+        ? t("voiceCall.warning", { message: warning })
+        : piBusy
+          // The call keeps answering while pi works, so say both: speak on, and
+          // the question is in flight.
+          ? `${t("voiceCall.hint")} · ${t("voiceCall.askingPi")}`
+          : t("voiceCall.hint");
 
   if (collapsed) {
     return (
@@ -250,7 +410,7 @@ export function VoiceConversationPanel({ sessionId, onClose }: { sessionId: stri
           {statusDot}
           <strong style={{ fontSize: 14 }}>{t("voiceCall.title")}</strong>
           <span style={{ fontSize: 12, color: "var(--text-muted)", marginLeft: "auto", marginRight: 4 }}>
-            {status === "connecting" ? t("voiceCall.connecting") : status === "error" ? t("voiceCall.error", { message: error }) : piBusy ? t("voiceCall.askingPi") : t("voiceCall.hint")}
+            {statusLine}
           </span>
           <button
             onClick={() => setCollapsed(true)}
@@ -277,12 +437,16 @@ export function VoiceConversationPanel({ sessionId, onClose }: { sessionId: stri
                 background: c.who === "me" ? "color-mix(in srgb, var(--accent) 14%, transparent)" : c.who === "pi" ? "var(--bg-hover)" : "var(--bg-panel)",
                 border: "1px solid var(--border)",
                 color: c.who === "pi" ? "var(--text-muted)" : c.live ? "var(--text-muted)" : "var(--text)",
+                opacity: c.ignored ? 0.45 : undefined,
                 fontStyle: c.live ? "italic" : undefined,
                 whiteSpace: "pre-wrap",
               }}
             >
               {c.who === "pi" && <span style={{ fontSize: 11, marginRight: 6, color: "var(--text-dim)" }}>pi</span>}
               {c.text}
+              {c.ignored && (
+                <span style={{ fontSize: 11, marginLeft: 6, color: "var(--text-dim)" }}>（{t("voiceCall.ignored")}）</span>
+              )}
             </div>
           ))}
           {captions.length === 0 && status === "live" && (

@@ -23,6 +23,7 @@ function storage(): ItemStorage | null {
 interface ItemStorage {
   getItem: (key: string) => string | null;
   setItem: (key: string, value: string) => void;
+  removeItem?: (key: string) => void;
 }
 
 export function callHistoryKey(sessionId: string): string {
@@ -46,8 +47,12 @@ export function loadCallHistory(sessionId: string, store: ItemStorage | null = s
 
 export function appendCallTurn(sessionId: string, turn: Omit<CallTurn, "at">, store: ItemStorage | null = storage()): CallTurn[] {
   const text = turn.text.trim();
-  const next = text ? [...loadCallHistory(sessionId, store), { who: turn.who, text, at: Date.now() }] : loadCallHistory(sessionId, store);
-  const trimmed = next.slice(-MAX_TURNS);
+  return text ? appendCallTurns(sessionId, [{ ...turn, text, at: Date.now() }], store) : loadCallHistory(sessionId, store);
+}
+
+/** Append finished turns (a migration) without rewriting their timestamps. */
+function appendCallTurns(sessionId: string, turns: CallTurn[], store: ItemStorage | null): CallTurn[] {
+  const trimmed = [...loadCallHistory(sessionId, store), ...turns].slice(-MAX_TURNS);
   try {
     store?.setItem(callHistoryKey(sessionId), JSON.stringify(trimmed));
   } catch { /* storage full or unavailable */ }
@@ -55,6 +60,20 @@ export function appendCallTurn(sessionId: string, turn: Omit<CallTurn, "at">, st
 }
 
 const LABELS: Record<CallTurn["who"], string> = { me: "我", ai: "助手", pi: "pi" };
+
+/**
+ * Move a call started before its session existed (a fresh composer's draft) onto
+ * the session that first ask_pi created, so the transcript stays in one piece.
+ */
+export function migrateCallHistory(from: string, to: string, store: ItemStorage | null = storage()): void {
+  if (!from || !to || from === to) return;
+  const turns = loadCallHistory(from, store);
+  if (!turns.length) return;
+  appendCallTurns(to, turns, store);
+  try {
+    store?.removeItem?.(callHistoryKey(from));
+  } catch { /* storage unavailable */ }
+}
 
 /**
  * The digest injected into a fresh realtime session ("input_text" item), or

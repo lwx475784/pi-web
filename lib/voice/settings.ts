@@ -4,6 +4,8 @@
 
 const ENABLED_KEY = "pi-voice-enabled";
 const URL_KEY = "pi-voice-url";
+const GATE_KEY = "pi-voice-gate";
+const WAKE_KEY = "pi-voice-wake";
 
 interface ItemStorage {
   getItem: (key: string) => string | null;
@@ -62,4 +64,49 @@ export function setRealtimeUrl(url: string, storage: ItemStorage | null = browse
 export function getRealtimeUrls(storage: ItemStorage | null = browserStorage()): string[] {
   const override = getRealtimeUrl(storage);
   return override ? [override] : [...DEFAULT_REALTIME_URLS];
+}
+
+/**
+ * How hard the microphone is gated against the room: 0 uploads everything, 100
+ * only speech at the mouth. The default cuts a voice through a wall, which a
+ * phone's own gain control otherwise lifts to your level.
+ */
+export const DEFAULT_GATE_SENSITIVITY = 45;
+
+export function getGateSensitivity(storage: ItemStorage | null = browserStorage()): number {
+  const raw = storage?.getItem(GATE_KEY);
+  if (raw === null || raw === undefined) return DEFAULT_GATE_SENSITIVITY;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed : DEFAULT_GATE_SENSITIVITY;
+}
+
+export function setGateSensitivity(value: number, storage: ItemStorage | null = browserStorage()): void {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return;
+  const clamped = Math.max(0, Math.min(100, Math.round(parsed)));
+  try {
+    if (clamped === DEFAULT_GATE_SENSITIVITY) storage?.removeItem?.(GATE_KEY);
+    else storage?.setItem(GATE_KEY, String(clamped));
+  } catch {
+    // Storage unavailable: the session keeps the current value.
+  }
+}
+
+/**
+ * The address word a turn must contain to be answered. "" (the default) answers
+ * anything addressed to the call, which is what a solo room wants; a name is what
+ * a shared living room wants.
+ */
+export function getWakeWord(storage: ItemStorage | null = browserStorage()): string {
+  return storage?.getItem(WAKE_KEY)?.trim() ?? "";
+}
+
+export function setWakeWord(word: string, storage: ItemStorage | null = browserStorage()): void {
+  try {
+    const trimmed = (word ?? "").trim();
+    if (trimmed) storage?.setItem(WAKE_KEY, trimmed);
+    else storage?.removeItem?.(WAKE_KEY);
+  } catch {
+    // Storage unavailable: nothing to persist.
+  }
 }

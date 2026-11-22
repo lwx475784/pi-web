@@ -4,7 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { RealtimeDictationClient } from "@/lib/voice/realtime-client";
 import { startMicCapture, type MicHandle } from "@/lib/voice/mic";
-import { getRealtimeUrls, getVoiceEnabled } from "@/lib/voice/settings";
+import { getGateSensitivity, getRealtimeUrls, getVoiceEnabled } from "@/lib/voice/settings";
+import { createNearSpeechGate } from "@/lib/voice/turn-gate";
 
 export type VoiceStatus = "idle" | "connecting" | "listening" | "finishing" | "error";
 export type VoiceSupport = "checking" | "ok" | "insecure" | "no-mic";
@@ -136,7 +137,7 @@ export function useVoiceInput(onSegment: (transcript: string) => void): UseVoice
         if (clientRef.current !== client) return; // cancelled meanwhile
         const mic = await startMicCapture((chunk) => {
           if (clientRef.current === client) client.sendAudio(chunk);
-        });
+        }, { gate: createNearSpeechGate({ sensitivity: getGateSensitivity() }) });
         if (clientRef.current !== client) {
           await mic.stop();
           return;

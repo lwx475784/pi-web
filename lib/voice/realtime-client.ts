@@ -15,10 +15,20 @@ export interface DictationError {
 }
 
 export interface DictationHandlers {
-  /** Authoritative final transcript for one VAD utterance. */
-  onSegment: (transcript: string) => void;
+  /**
+   * Authoritative final transcript for one VAD utterance. `accepted` is the
+   * caller's own verdict from `acceptTurn`: a rejected turn still reaches the
+   * transcript, it just never gets an answer.
+   */
+  onSegment: (transcript: string, info: { seconds: number; accepted: boolean }) => void;
   /** In-progress hypothesis across all not-yet-final items (display only). */
   onPartial: (transcript: string) => void;
+  /**
+   * Swallow a turn the user did not say — a voice from another room, one
+   * interjection. Returning false skips the reply this client would ask for.
+   * `seconds` is the turn's audio length, 0 when the server does not report it.
+   */
+  acceptTurn?: (transcript: string, seconds: number) => boolean;
   onError?: (error: DictationError) => void;
   /** The user started talking: a conversation client flushes its player. */
   onSpeechStarted?: () => void;
@@ -28,6 +38,8 @@ export interface DictationHandlers {
   onAssistantDelta?: (text: string) => void;
   /** The model called a tool declared in `tools`. */
   onFunctionCall?: (call: { callId: string; name: string; argumentsJson: string }) => void;
+  /** A response opened: the voice layer is about to speak. */
+  onResponseStarted?: () => void;
   /** A response closed: completed | cancelled | failed | incomplete. */
   onResponseDone?: (status: string) => void;
 }
@@ -50,9 +62,31 @@ export interface RealtimeClientOptions {
   /** Function tools for `session.update` (conversation mode). */
   tools?: unknown[];
   instructions?: string;
+  /**
+   * Take over turn-taking: the server's VAD stops answering by itself
+   * (`turn_detection.create_response: false`) and this client asks for a reply
+   * only when the way is clear. The speech-to-speech server refuses a response
+   * request that lands while another is open, or while a function call still
+   * owes it an output (`function_call_output_pending`) — which is what a call
+   * that goes silent in the middle of a tool run looks like.
+   */
+  gateResponses?: boolean;
 }
 
 const SILENCE_CHUNK_B64 = "AA".repeat(3200); // 100 ms of 16 kHz mono PCM16
+
+/**
+ * Marks an injected message as something the user did not say, so the voice
+ * layer tells it apart from its own transcript: a job that finished long after
+ * it was started arrives as a background event instead of a waiting tool call.
+ */
+export const BACKGROUND_EVENT_PREFIX = "[background event, not said by the user]";
+
+/** A `response.create` the server refused: it stays owed and is retried. */
+const RETRYABLE_CREATE_ERRORS = new Set([
+  "function_call_output_pending",
+  "conversation_already_has_active_response",
+]);
 
 export function toBase64(bytes: Uint8Array): string {
   if (typeof Buffer !== "undefined") return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
@@ -69,11 +103,25 @@ export class RealtimeDictationClient {
   private readonly pending = new Map<string, string>();
   private readonly finalized = new Set<string>();
   private lastKey = "";
+  private readonly gate: boolean;
+  /** A response is generating, or its audio is being sent. */
+  private inResponse = false;
+  /** We asked for a response and the server has not opened one yet. */
+  private createOpen = false;
+  /** Tool calls the model made that we still owe an output for. */
+  private readonly openCalls = new Set<string>();
+  /** A reply is due as soon as the way clears. */
+  private owed = false;
+  /** Out-of-band announcements to speak, oldest first. */
+  private readonly notices: string[] = [];
+  /** The user is mid-sentence: hold an announcement until they finish. */
+  private speaking = false;
 
   constructor(urls: string[], handlers: DictationHandlers, opts: RealtimeClientOptions = {}) {
     this.urls = urls;
     this.handlers = handlers;
     this.opts = opts;
+    this.gate = opts.gateResponses === true;
   }
 
   get connected(): boolean {
@@ -124,7 +172,14 @@ export class RealtimeDictationClient {
               type: "session.update",
               session: {
                 type: "realtime",
-                audio: { input: { turn_detection: { type: "server_vad" } } },
+                audio: {
+                  input: {
+                    turn_detection: {
+                      type: "server_vad",
+                      ...(this.gate ? { create_response: false } : {}),
+                    },
+                  },
+                },
                 extensions: ["speech_to_speech.input_audio_transcription.snapshot"],
                 ...(this.opts.instructions ? { instructions: this.opts.instructions } : {}),
                 ...(this.opts.tools?.length ? { tools: this.opts.tools } : {}),
@@ -146,11 +201,71 @@ export class RealtimeDictationClient {
 
   /** Deliver a tool result; `createResponse` also asks the model to speak it. */
   sendFunctionOutput(callId: string, output: string, createResponse = true): void {
+    this.openCalls.delete(callId);
     this.sendEvent({
       type: "conversation.item.create",
       item: { type: "function_call_output", call_id: callId, output },
     });
-    if (createResponse) this.sendEvent({ type: "response.create" });
+    if (createResponse) this.requestReply();
+  }
+
+  /** Ask the voice layer for a spoken reply to what the conversation holds. */
+  requestReply(): void {
+    if (!this.gate) {
+      this.sendEvent({ type: "response.create" });
+      return;
+    }
+    this.owed = true;
+    this.replyWhenClear();
+  }
+
+  /**
+   * Queue an announcement of work that finished on its own — pi's answer
+   * minutes after the tool call that started it — so the conversation stays
+   * open while the work runs, and is told about it when the user next stops.
+   */
+  notify(text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (!this.gate) {
+      this.injectNotice(trimmed);
+      this.requestReply();
+      return;
+    }
+    this.notices.push(trimmed);
+    this.replyWhenClear();
+  }
+
+  /** Forget queued announcements the user cancelled. */
+  dropNotifications(): void {
+    this.notices.length = 0;
+  }
+
+  private injectNotice(text: string): void {
+    this.sendEvent({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: `${BACKGROUND_EVENT_PREFIX} ${text}` }],
+      },
+    });
+  }
+
+  /** Send the next owed reply, but only where a response can be created. */
+  private replyWhenClear(): void {
+    if (this.inResponse || this.createOpen || this.openCalls.size > 0) return;
+    const notice = this.notices[0];
+    if (notice !== undefined && this.speaking) return;
+    if (notice === undefined && !this.owed) return;
+    if (notice !== undefined) {
+      this.notices.shift();
+      this.injectNotice(notice);
+    }
+    // One reply covers the announcement and anything the user said around it.
+    this.owed = false;
+    this.createOpen = true;
+    this.sendEvent({ type: "response.create" });
   }
 
   sendAudio(base64Pcm16: string): void {
@@ -196,18 +311,36 @@ export class RealtimeDictationClient {
       case "conversation.item.input_audio_transcription.completed": {
         const key = String(msg.item_id ?? "") || this.lastKey || "_anon";
         const transcript = typeof msg.transcript === "string" ? msg.transcript : (this.pending.get(key) ?? "");
-        if (!this.finalized.has(key) && transcript.trim()) this.handlers.onSegment(transcript.trim());
+        const settled = !this.finalized.has(key) && transcript.trim().length > 0;
+        const seconds = Number((msg.usage as { seconds?: unknown } | null)?.seconds);
+        const accepted = settled && (this.handlers.acceptTurn?.(transcript.trim(), Number.isFinite(seconds) ? seconds : 0) ?? true);
+        if (settled) this.handlers.onSegment(transcript.trim(), { seconds: Number.isFinite(seconds) ? seconds : 0, accepted });
         this.finalized.add(key);
         this.pending.delete(key);
         if (key === this.lastKey) this.lastKey = "";
         this.emitPartial();
+        // Only a gated client drives generation, and only for turns it accepts;
+        // dictation lets the server answer on its own and cancels what it answers.
+        if (accepted && this.gate) this.requestReply();
         return;
       }
       case "input_audio_buffer.speech_started": {
+        this.speaking = true;
         this.handlers.onSpeechStarted?.();
         return;
       }
+      case "input_audio_buffer.speech_stopped":
+      // A committed turn ends the sentence even if its soft-end was never sent:
+      // an announcement must not sit behind a stuck `speaking` flag.
+      case "input_audio_buffer.committed": {
+        this.speaking = false;
+        this.replyWhenClear();
+        return;
+      }
       case "response.created": {
+        this.inResponse = true;
+        this.createOpen = false;
+        this.handlers.onResponseStarted?.();
         // Dictation does not want the assistant's reply: cancel it as soon as
         // it opens so no audio is synthesized and no history is kept.
         if (this.opts.cancelResponses !== false) this.ws?.send(JSON.stringify({ type: "response.cancel" }));
@@ -215,30 +348,43 @@ export class RealtimeDictationClient {
       }
       case "response.output_audio.delta": {
         const chunk = msg.delta;
-        if (typeof chunk === "string") this.handlers.onAudioChunk?.(chunk);
+        // A cancelled reply keeps streaming its already-synthesized audio; the
+        // player was flushed when the user interrupted, so drop it here too.
+        if (typeof chunk === "string" && this.inResponse) this.handlers.onAudioChunk?.(chunk);
         return;
       }
       case "response.output_audio_transcript.delta": {
         const chunk = msg.delta;
-        if (typeof chunk === "string") this.handlers.onAssistantDelta?.(chunk);
+        if (typeof chunk === "string" && this.inResponse) this.handlers.onAssistantDelta?.(chunk);
         return;
       }
       case "response.function_call_arguments.done": {
+        const callId = String(msg.call_id ?? "");
+        if (callId) this.openCalls.add(callId);
         this.handlers.onFunctionCall?.({
-          callId: String(msg.call_id ?? ""),
+          callId,
           name: String(msg.name ?? ""),
           argumentsJson: String(msg.arguments ?? "{}"),
         });
         return;
       }
       case "response.done": {
+        this.inResponse = false;
+        this.createOpen = false;
         const response = (msg.response ?? {}) as Record<string, unknown>;
         this.handlers.onResponseDone?.(String(response.status ?? "completed"));
+        this.replyWhenClear();
         return;
       }
       case "error": {
         const err = (msg.error ?? {}) as Record<string, unknown>;
         const code = String(err.code ?? err.type ?? "unknown");
+        if (RETRYABLE_CREATE_ERRORS.has(code) && this.createOpen) {
+          // Nothing opened, so the reply is still owed: retry once the reason
+          // for the refusal is gone.
+          this.createOpen = false;
+          this.owed = true;
+        }
         if (code === "session_limit_reached") {
           this.handlers.onError?.({ code, message: "voice server busy" });
         } else {

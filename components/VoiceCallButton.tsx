@@ -4,8 +4,9 @@ import { useI18n } from "@/hooks/useI18n";
 
 /**
  * Composer entry for the two-layer voice call (mic icon for dictation, this
- * handset icon for talking with the agent). Rendered only when the caller
- * offers a live session to attach the call to.
+ * handset icon for talking with the agent). Rendered wherever the page has
+ * somewhere to put the conversation: a session, or a fresh composer that can
+ * start one when the first question reaches pi.
  */
 export function VoiceCallButton({ isMobile, controlSize, onStart }: { isMobile: boolean; controlSize: number; onStart: () => void }) {
   const { t } = useI18n();

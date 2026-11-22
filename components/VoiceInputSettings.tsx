@@ -4,18 +4,32 @@ import { useEffect, useState } from "react";
 
 import { detectVoiceSupport, type VoiceSupport } from "@/hooks/useVoiceInput";
 import { useI18n } from "@/hooks/useI18n";
-import { DEFAULT_REALTIME_URLS, getRealtimeUrl, getVoiceEnabled, setRealtimeUrl, setVoiceEnabled } from "@/lib/voice/settings";
+import {
+  DEFAULT_GATE_SENSITIVITY,
+  DEFAULT_REALTIME_URLS,
+  getGateSensitivity,
+  getRealtimeUrl,
+  getVoiceEnabled,
+  getWakeWord,
+  setGateSensitivity,
+  setRealtimeUrl,
+  setVoiceEnabled,
+  setWakeWord,
+} from "@/lib/voice/settings";
 
 /**
- * Settings → General → Voice input: the feature switch and the address of the
- * self-hosted OpenAI Realtime (speech-to-speech) server. Kept in localStorage,
- * like the sound toggle, so there is no server-side configuration to hold.
+ * Settings → General → Voice input: the feature switch, the address of the
+ * self-hosted OpenAI Realtime (speech-to-speech) server, and the two gates that
+ * keep other people's voices out of a call. Kept in localStorage, like the sound
+ * toggle, so there is no server-side configuration to hold.
  */
 export function VoiceInputSettings() {
   const { t } = useI18n();
   const [enabled, setEnabled] = useState(true);
   const [url, setUrl] = useState("");
   const [savedUrl, setSavedUrl] = useState("");
+  const [sensitivity, setSensitivity] = useState(DEFAULT_GATE_SENSITIVITY);
+  const [wake, setWake] = useState("");
   const [support, setSupport] = useState<VoiceSupport>("checking");
 
   useEffect(() => {
@@ -23,12 +37,24 @@ export function VoiceInputSettings() {
     const current = getRealtimeUrl();
     setUrl(current);
     setSavedUrl(current);
+    setSensitivity(getGateSensitivity());
+    setWake(getWakeWord());
     setSupport(detectVoiceSupport());
   }, []);
 
   const saveUrl = () => {
     setRealtimeUrl(url);
     setSavedUrl(url.trim());
+  };
+
+  const saveWake = () => {
+    setWakeWord(wake);
+    setWake(getWakeWord());
+  };
+
+  const changeSensitivity = (value: number) => {
+    setSensitivity(value);
+    setGateSensitivity(value);
   };
 
   return (
@@ -64,6 +90,34 @@ export function VoiceInputSettings() {
       {enabled && savedUrl === "" && (
         <p className="settings-general-description">{t("settings.voiceDefaultUrls", { urls: DEFAULT_REALTIME_URLS.join(" · ") })}</p>
       )}
+      <label className="settings-send-mode-option">
+        <span className="settings-send-mode-label">{t("settings.voiceGate")}</span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={sensitivity}
+          aria-label={t("settings.voiceGate")}
+          onChange={(event) => changeSensitivity(Number(event.target.value))}
+        />
+        <span className="settings-send-mode-label">{sensitivity}</span>
+      </label>
+      <p className="settings-general-description">{t("settings.voiceGateHint")}</p>
+      <label className="settings-send-mode-option">
+        <span className="settings-send-mode-label">{t("settings.voiceWake")}</span>
+        <input
+          className="model-context-input"
+          type="text"
+          spellCheck={false}
+          value={wake}
+          placeholder={t("settings.voiceWakePlaceholder")}
+          aria-label={t("settings.voiceWake")}
+          onChange={(event) => setWake(event.target.value)}
+          onBlur={saveWake}
+          onKeyDown={(event) => { if (event.key === "Enter") saveWake(); }}
+        />
+      </label>
       {(support === "insecure" || support === "no-mic") && (
         <p role="alert" className="settings-general-error">{t("settings.voiceUnavailable")}</p>
       )}

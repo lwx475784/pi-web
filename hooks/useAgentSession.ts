@@ -1287,6 +1287,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     eventConnectionRef.current!.maintain(sid);
   }, []);
 
+  /**
+   * The session this page can attach live work to: the open one, or a fresh
+   * composer's session — created, given its event stream and promoted to a real
+   * transcript, exactly as its first typed send would. Lazy on purpose: a voice
+   * call that never asked pi leaves no empty session behind.
+   */
+  const ensureLiveSession = useCallback(async (): Promise<string | null> => {
+    if (!isNew) return session?.id ?? sessionIdRef.current ?? null;
+    const sid = sessionIdRef.current ?? await ensureNewSession();
+    if (!sid) return null;
+    // A stream the fresh composer has not opened yet: pi's turns would run
+    // without the page ever hearing about them.
+    await ensureEventsConnected(sid).catch(() => undefined);
+    promoteNewSession();
+    return sid;
+  }, [ensureEventsConnected, ensureNewSession, isNew, promoteNewSession, session?.id]);
+
   // Keep the selected session's stream open even while its agent is idle. The
   // session itself stays alive on the page's lease renewals (below), which stop
   // if the browser disappears.
@@ -1355,7 +1372,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               subagentsActive: reply.subagentsActive === true,
             },
           };
-        } catch {}
+        } catch { /* the debug record only: it must not fail the lease */ }
       }
     })();
     leaseRequestRef.current = request;
@@ -3708,6 +3725,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleRecallQueue,
     handleBuiltinSlashCommand,
     handleEditContent,
+    ensureLiveSession,
     // Present only while a history edit is pending.
     cancelEdit: editEntryId ? cancelEdit : undefined,
     addNotice,
