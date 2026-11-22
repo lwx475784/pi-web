@@ -6,7 +6,7 @@ import { RealtimeDictationClient } from "@/lib/voice/realtime-client";
 import { startMicCapture, type MicHandle } from "@/lib/voice/mic";
 import { createAudioOut, type AudioOutHandle } from "@/lib/voice/audio-out";
 import { getGateSensitivity, getRealtimeUrls, getWakeWord } from "@/lib/voice/settings";
-import { classifyTurn, createNearSpeechGate } from "@/lib/voice/turn-gate";
+import { classifyTurn, createNearSpeechGate, type NearGateHandle } from "@/lib/voice/turn-gate";
 import { askPiReply, isPiRequestCancelled, stopPiRun } from "@/lib/voice/pi-bridge";
 import { appendCallTurn, buildReplayMessage, loadCallHistory, migrateCallHistory, type CallTurn } from "@/lib/voice/call-history";
 import { useI18n } from "@/hooks/useI18n";
@@ -76,10 +76,15 @@ interface Props {
  * background event when the user next stops talking. `stop_pi` drops a job the
  * user no longer wants — that is what a spoken "算了" interrupts.
  *
- * Collapsing hides the panel but keeps the call live (mic, barge-in, audio out
- * run on); the pill restores the scene at once. The transcript and a bounded
- * context digest persist per session, so re-opening later — even after a
- * reload — resumes where the last call was.
+ * Collapsing hides the panel but keeps the call live (socket, audio out and
+ * transcript run on, so pi's answer is still announced); it **frees the
+ * microphone**, which the user needs for their own voice input — two captures
+ * on one device compete for it. The pill sits in the bottom-right corner, and
+ * the open panel is anchored to the same corner instead of covering the page as
+ * a modal, so a call never hides the session the user is reading. The pill
+ * restores the scene at once. The transcript and a bounded context digest
+ * persist per session, so re-opening later — even after a reload — resumes
+ * where the last call was.
  */
 export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, onClose }: Props) {
   const { t } = useI18n();
@@ -92,6 +97,12 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
   const [piBusy, setPiBusy] = useState(false);
   const clientRef = useRef<RealtimeDictationClient | null>(null);
   const micRef = useRef<MicHandle | null>(null);
+  /** Capture follows the panel, so the collapse effect needs the current value. */
+  const collapsedRef = useRef(collapsed);
+  /** The room floor is measured once per call and survives a mic restart. */
+  const gateRef = useRef<NearGateHandle | null>(null);
+  /** A restart while an earlier start is still opening must not take a second stream. */
+  const openingMicRef = useRef(false);
   const audioRef = useRef<AudioOutHandle | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const seqRef = useRef(1);
@@ -143,6 +154,35 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
   }, []);
   const stopPiJobsRef = useRef(stopPiJobs);
   stopPiJobsRef.current = stopPiJobs;
+
+  /**
+   * Take the microphone: the call starts with it, and opening the panel takes it
+   * back after a collapse freed the device. Throws for the caller to report. A
+   * capture that finishes opening after the panel collapsed — or after the call
+   * hung up — frees the device again instead of holding it.
+   */
+  const startCapture = useCallback(async (): Promise<void> => {
+    const client = clientRef.current;
+    if (!client || micRef.current || openingMicRef.current) return;
+    openingMicRef.current = true;
+    try {
+      const mic = await startMicCapture((chunk) => client.sendAudio(chunk), { gate: gateRef.current ?? undefined });
+      if (collapsedRef.current || clientRef.current !== client) {
+        void mic.stop().catch(() => undefined);
+        return;
+      }
+      micRef.current = mic;
+    } finally {
+      openingMicRef.current = false;
+    }
+  }, []);
+
+  /** Free the microphone. The socket, audio out and transcript stay live. */
+  const stopCapture = useCallback(async (): Promise<void> => {
+    const mic = micRef.current;
+    micRef.current = null;
+    if (mic) await mic.stop().catch(() => undefined);
+  }, []);
 
   /** Hand one question to pi, and announce its answer whenever it lands. */
   const startPiJob = useCallback((callId: string, question: string) => {
@@ -226,8 +266,9 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
     audioRef.current = audioOut;
     let disposed = false;
     // Both gates read their settings when the call starts, so a change lands on
-    // the next call rather than half-way through this one.
-    const gate = createNearSpeechGate({ sensitivity: getGateSensitivity() });
+    // the next call rather than half-way through this one. The room floor lives
+    // in a ref: restarting the capture when the panel re-opens keeps it.
+    gateRef.current = createNearSpeechGate({ sensitivity: getGateSensitivity() });
     const wakeWord = getWakeWord();
     const client = new RealtimeDictationClient(getRealtimeUrls(), {
       onPartial: (text) => { if (text) upsertLiveRef.current("me", text); },
@@ -302,12 +343,8 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
         if (disposed) return;
         const replay = buildReplayMessage(history);
         if (replay) client.sendEvent({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text: replay }] } });
-        const mic = await startMicCapture((chunk) => client.sendAudio(chunk), { gate });
-        if (disposed) {
-          await mic.stop();
-          return;
-        }
-        micRef.current = mic;
+        await startCapture();
+        if (disposed) return;
         setStatus("live");
       } catch (e) {
         if (disposed) return;
@@ -337,6 +374,18 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [captions, piBusy, collapsed]);
+
+  // A collapsed call gives the microphone up: the user dictates with their own
+  // voice input, and two captures on one device compete for it. Opening the pill
+  // takes it back. The call itself keeps running either way — pi's answer is
+  // still announced — so only capture moves with the panel.
+  useEffect(() => {
+    collapsedRef.current = collapsed;
+    // While the socket is still opening, the call's own start owns the device.
+    if (!clientRef.current?.connected) return;
+    if (collapsed) void stopCapture();
+    else void startCapture().catch((e: unknown) => setWarning(e instanceof Error ? e.message : String(e)));
+  }, [collapsed, startCapture, stopCapture]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setCollapsed(true); };
@@ -393,19 +442,17 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
   return (
     <div
       role="dialog"
-      aria-modal="true"
       aria-label={t("voiceCall.title")}
-      onMouseDown={() => setCollapsed(true)}
-      style={{ position: "fixed", inset: 0, zIndex: 70, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}
+      style={{
+        // The same corner the pill holds: the panel opens beside the session
+        // instead of over it, so a call never hides the answer being read.
+        position: "fixed", right: 16, bottom: "calc(16px + env(safe-area-inset-bottom))", zIndex: 70,
+        width: "min(420px, calc(100vw - 32px))",
+        background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 14,
+        color: "var(--text)", boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+        display: "flex", flexDirection: "column", gap: 8, padding: 14,
+      }}
     >
-      <div
-        onMouseDown={(e) => e.stopPropagation()}
-        style={{
-          width: "min(560px, calc(100vw - 24px))", marginBottom: "calc(16px + env(safe-area-inset-bottom))",
-          background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 14,
-          color: "var(--text)", boxShadow: "0 12px 40px rgba(0,0,0,0.35)", display: "flex", flexDirection: "column", gap: 8, padding: 14,
-        }}
-      >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {statusDot}
           <strong style={{ fontSize: 14 }}>{t("voiceCall.title")}</strong>
@@ -462,7 +509,6 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
         >
           {t("voiceCall.hangup")}
         </button>
-      </div>
     </div>
   );
 }
