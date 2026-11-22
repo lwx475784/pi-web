@@ -5,9 +5,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { RealtimeDictationClient } from "@/lib/voice/realtime-client";
 import { startMicCapture, type MicHandle } from "@/lib/voice/mic";
 import { createAudioOut, type AudioOutHandle } from "@/lib/voice/audio-out";
-import { getGateSensitivity, getRealtimeUrls, getWakeWord } from "@/lib/voice/settings";
+import { getEventStreamEnabled, getGateSensitivity, getRealtimeUrls, getWakeWord } from "@/lib/voice/settings";
 import { classifyTurn, createNearSpeechGate, type NearGateHandle } from "@/lib/voice/turn-gate";
-import { askPiReply, isPiRequestCancelled, stopPiRun } from "@/lib/voice/pi-bridge";
+import { askPiReply, createRequestId, isPiRequestCancelled, stopPiRun } from "@/lib/voice/pi-bridge";
+import { createRunEndWatcher, type RunEndWatcher } from "@/lib/voice/answer-watcher";
 import { appendCallTurn, buildReplayMessage, loadCallHistory, migrateCallHistory, type CallTurn } from "@/lib/voice/call-history";
 import { useI18n } from "@/hooks/useI18n";
 
@@ -20,12 +21,17 @@ interface Caption {
   ignored?: boolean;
 }
 
-/** A question handed to pi; its answer arrives later, if the user lets it. */
+/**
+ * A question handed to pi; its answer arrives later, if the user lets it.
+ * `requestId` is the submission's identity: pi echoes it back on the event that ends the run this
+ * ask started, so an answer is matched to its question instead of assumed (ADR 0008).
+ */
 interface PiJob {
   question: string;
   captionId: number;
   controller: AbortController;
   cancelled: boolean;
+  requestId: string;
 }
 
 const ASK_PI_TOOL = {
@@ -104,6 +110,8 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
   /** A restart while an earlier start is still opening must not take a second stream. */
   const openingMicRef = useRef(false);
   const audioRef = useRef<AudioOutHandle | null>(null);
+  /** Watches pi's run-end events for every job this call started. */
+  const watcherRef = useRef<RunEndWatcher | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const seqRef = useRef(1);
   const meIdRef = useRef(0);
@@ -184,11 +192,23 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
     if (mic) await mic.stop().catch(() => undefined);
   }, []);
 
+  /**
+   * One watcher for the whole call: it turns pi's `prompt_done` carrying a job's requestId into
+   * "that answer is ready", which is what lets the bridge read the right answer rather than the
+   * newest one. With the setting off it returns null and the bridge polls as it always did.
+   */
+  const getWatcher = useCallback((): RunEndWatcher | null => {
+    if (!getEventStreamEnabled()) return null;
+    if (!watcherRef.current) watcherRef.current = createRunEndWatcher();
+    return watcherRef.current;
+  }, []);
+
   /** Hand one question to pi, and announce its answer whenever it lands. */
   const startPiJob = useCallback((callId: string, question: string) => {
     const controller = new AbortController();
     const captionId = seqRef.current++;
-    jobsRef.current.set(callId, { question, captionId, controller, cancelled: false });
+    const requestId = createRequestId();
+    jobsRef.current.set(callId, { question, captionId, controller, cancelled: false, requestId });
     setPiBusy(true);
     setCaptions((prev) => [...prev, { id: captionId, who: "pi", text: `… ${question}` }]);
     void (async () => {
@@ -201,7 +221,11 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
       try {
         const sid = await ensureSessionRef.current();
         if (!sid) throw new Error("no session to ask pi in");
-        answer = await askPiReply(sid, `[语音通话] ${question}`, { signal: controller.signal });
+        answer = await askPiReply(sid, `[语音通话] ${question}`, {
+          signal: controller.signal,
+          watcher: getWatcher() ?? undefined,
+          requestIdFactory: () => requestId,
+        });
       } catch (e) {
         if (isPiRequestCancelled(e)) return; // the user stopped it: nothing to say
         failed = true;
@@ -219,7 +243,7 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
         ? `pi 没能回答「${question}」：${answer.replace(/^pi: /, "")}`
         : `pi 对「${question}」的回答：${answer}`);
     })();
-  }, []);
+  }, [getWatcher]);
   const startPiJobRef = useRef(startPiJob);
   startPiJobRef.current = startPiJob;
 
@@ -363,6 +387,9 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
       const mic = micRef.current;
       micRef.current = null;
       if (mic) void mic.stop().catch(() => undefined);
+      const watcher = watcherRef.current;
+      watcherRef.current = null;
+      watcher?.close();
       const clientToClose = client;
       clientToClose.close(); // a hang-up keeps its transcript locally, not in the server's conversation
       audioOut.close();

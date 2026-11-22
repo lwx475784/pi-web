@@ -6,6 +6,7 @@ const ENABLED_KEY = "pi-voice-enabled";
 const URL_KEY = "pi-voice-url";
 const GATE_KEY = "pi-voice-gate";
 const WAKE_KEY = "pi-voice-wake";
+const EVENTS_KEY = "pi-voice-events";
 
 interface ItemStorage {
   getItem: (key: string) => string | null;
@@ -87,6 +88,25 @@ export function setGateSensitivity(value: number, storage: ItemStorage | null = 
   try {
     if (clamped === DEFAULT_GATE_SENSITIVITY) storage?.removeItem?.(GATE_KEY);
     else storage?.setItem(GATE_KEY, String(clamped));
+  } catch {
+    // Storage unavailable: the session keeps the current value.
+  }
+}
+
+/**
+ * Whether the voice bridge waits for pi's own run-end event (the default, ADR 0008) or falls
+ * back to polling the session's state and transcript. The switch exists so a wire mismatch or a
+ * refused event stream is one setting away from the old behaviour, without a rebuild: the poll
+ * answers late and by inference, but it still answers.
+ */
+export function getEventStreamEnabled(storage: ItemStorage | null = browserStorage()): boolean {
+  return storage?.getItem(EVENTS_KEY) !== "0";
+}
+
+export function setEventStreamEnabled(on: boolean, storage: ItemStorage | null = browserStorage()): void {
+  try {
+    if (on) storage?.removeItem?.(EVENTS_KEY);
+    else storage?.setItem(EVENTS_KEY, "0");
   } catch {
     // Storage unavailable: the session keeps the current value.
   }
