@@ -140,6 +140,14 @@ the side-effect confirmation flow itself (this ADR fixes the rules, ticket 04 fi
 `stop_pi` touches), history clearing and 24 h expiry in the UI, TTS streaming first audio, a
 faster small-talk route. Deferred until the call is shared with other people: authentication,
 mandatory TLS, dropping the plain-LAN candidate URL, speaker identification.
-One structural item to settle before any of this reaches anyone else: the voice work is seven
-local commits on `feature/voice-input` against `agegr/pi-web` with no push rights and no fork,
-so the upstream path (fork, PR shape, whether this ADR ships with it) is still undecided.
+Upstream path, settled on 2026-11-22: `agegr/pi-web` is somebody else's public repo and this
+checkout has read-only rights there, so the work lives on a fork —
+[`lwx475784/pi-web`](https://github.com/lwx475784/pi-web), branch `feature/voice-input`, pushed
+after every gate item lands. No pull request yet: the delivery number (0 % mis-paired over 20
+asks) is one sample, and a PR that changes the agent event wire (the `requestId` echo) should go
+with the shape of that contract, not with a personal voice stack. When a PR is opened, this ADR
+and the evaluation report ship with it as the rationale, and the branch is expected to rebase
+onto upstream `main` first — it carries home topology (`lib/voice/settings.ts` defaults to this
+household's tailnet host and LAN address, and the wake-word sample in
+`lib/voice/turn-gate.test.mjs` is the assistant's real name), none of which belongs upstream
+without a configuration story.
