@@ -847,6 +847,7 @@ export const zhTWLocale: LocalePlugin = {
     "voiceCall.ignored": "沒回應",
     "voiceCall.collapse": "收起",
     "voiceCall.expand": "返回通話",
+    "voiceCall.unread": "{count} 條待讀",
     "chat.previewImage": "預覽圖片",
     "chat.filterModels": "篩選模型…",
     "chat.modelScopeScoped": "已限定",

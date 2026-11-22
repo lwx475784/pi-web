@@ -9,6 +9,7 @@ import { getEventStreamEnabled, getGateSensitivity, getRealtimeUrls, getWakeWord
 import { classifyTurn, createNearSpeechGate, type NearGateHandle } from "@/lib/voice/turn-gate";
 import { askPiReply, createRequestId, isPiRequestCancelled, stopPiRun } from "@/lib/voice/pi-bridge";
 import { createRunEndWatcher, type RunEndWatcher } from "@/lib/voice/answer-watcher";
+import { markAnnouncementsRead, readLedger, recordAnnouncement } from "@/lib/voice/ledger-api";
 import { appendCallTurn, buildReplayMessage, loadCallHistory, migrateCallHistory, type CallTurn } from "@/lib/voice/call-history";
 import { useI18n } from "@/hooks/useI18n";
 
@@ -101,6 +102,8 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
   const [warning, setWarning] = useState("");
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [piBusy, setPiBusy] = useState(false);
+  /** Answers that exist but were never spoken: the ledger's unread count, shown on the pill. */
+  const [unreadCount, setUnreadCount] = useState(0);
   const clientRef = useRef<RealtimeDictationClient | null>(null);
   const micRef = useRef<MicHandle | null>(null);
   /** Capture follows the panel, so the collapse effect needs the current value. */
@@ -144,6 +147,44 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
   const ensureSessionRef = useRef(ensureSession);
   ensureSessionRef.current = ensureSession;
 
+  /**
+   * The ledger keeps a missed announcement from being silent: every finished ask is recorded, and
+   * an entry stops being unread only when its text actually reached the model. Read back from the
+   * server after each change rather than counted here, so two pages watching one session agree.
+   */
+  const refreshUnread = useCallback(async (sid: string): Promise<void> => {
+    const snapshot = await readLedger(sid);
+    setUnreadCount(snapshot.unread.length);
+  }, []);
+  const refreshUnreadRef = useRef(refreshUnread);
+  refreshUnreadRef.current = refreshUnread;
+
+  /** Record one finished ask, then say it, tagged with the entry to clear once it is heard. */
+  const announce = useCallback(async (sid: string, spoken: string, entry: {
+    requestId: string;
+    kind: "answer" | "failure";
+    question: string;
+    text: string;
+  }): Promise<void> => {
+    const id = await recordAnnouncement(sid, entry);
+    await refreshUnread(sid);
+    clientRef.current?.notify(spoken, id ?? "");
+  }, [refreshUnread]);
+  const announceRef = useRef(announce);
+  announceRef.current = announce;
+
+  /** Speak what an earlier call left unread: one answer, and a count for the rest. */
+  const replayUnread = useCallback(async (sid: string): Promise<void> => {
+    const snapshot = await readLedger(sid);
+    setUnreadCount(snapshot.unread.length);
+    const newest = snapshot.replay.newest;
+    if (!newest) return;
+    const more = snapshot.replay.more > 0
+      ? `（还有 ${snapshot.replay.more} 条没念，可在页面上看）`
+      : "";
+    clientRef.current?.notify(`上次通话没念的${newest.kind === "failure" ? "失败" : "回答"}：${newest.text}${more}`, newest.id);
+  }, []);
+
   /** Drop every job the voice layer started: no answer, no announcement. */
   const stopPiJobs = useCallback(() => {
     const jobs = [...jobsRef.current.values()];
@@ -153,6 +194,9 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
     const sid = sessionRef.current;
     if (sid && jobs.length) void stopPiRun(sid);
     for (const job of jobs) {
+      // A stopped ask is still a record: the ledger shows it was stopped rather than lost.
+      if (sid) void recordAnnouncement(sid, { requestId: job.requestId, kind: "cancelled", question: job.question, text: "" })
+        .then(() => refreshUnreadRef.current(sid));
       job.cancelled = true;
       job.controller.abort();
       setCaptions((prev) => prev.map((c) => (c.id === job.captionId
@@ -239,9 +283,12 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
       if (failed) setWarning(answer);
       else persistRef.current("pi", answer);
       // Model-facing: the voice layer says it in its own words.
-      clientRef.current?.notify(failed
+      const spoken = failed
         ? `pi 没能回答「${question}」：${answer.replace(/^pi: /, "")}`
-        : `pi 对「${question}」的回答：${answer}`);
+        : `pi 对「${question}」的回答：${answer}`;
+      const sid = sessionRef.current;
+      if (sid) await announceRef.current(sid, spoken, { requestId, kind: failed ? "failure" : "answer", question, text: answer });
+      else clientRef.current?.notify(spoken);
     })();
   }, [getWatcher]);
   const startPiJobRef = useRef(startPiJob);
@@ -328,6 +375,13 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
         if (aiTextRef.current.trim()) persistRef.current("ai", aiTextRef.current.trim());
         aiTextRef.current = "";
       },
+      // The notice reached the model, so the call no longer owes it. A hang-up before this point
+      // leaves the entry unread, which is exactly what the next call replays.
+      onNoticeInjected: (tag) => {
+        const sid = sessionRef.current;
+        if (!sid || !tag) return;
+        void markAnnouncementsRead(sid, [tag]).then(() => refreshUnreadRef.current(sid));
+      },
       onAudioChunk: (b64) => audioOut.enqueue(b64),
       onFunctionCall: ({ callId, name, argumentsJson }) => {
         let question = "";
@@ -370,6 +424,9 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
         await startCapture();
         if (disposed) return;
         setStatus("live");
+        // A call that opens onto an existing session owes whatever the last one never said.
+        const sid = sessionRef.current;
+        if (sid) await replayUnreadRef.current(sid);
       } catch (e) {
         if (disposed) return;
         setError((e as Error)?.message ?? "unreachable");
@@ -420,6 +477,9 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  const replayUnreadRef = useRef(replayUnread);
+  replayUnreadRef.current = replayUnread;
+
   const statusDot = (
     <span
       aria-hidden="true"
@@ -430,6 +490,8 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
       }}
     />
   );
+
+  const unreadLabel = unreadCount > 0 ? t("voiceCall.unread", { count: String(unreadCount) }) : "";
 
   const statusLine = status === "connecting"
     ? t("voiceCall.connecting")
@@ -442,6 +504,9 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
           // the question is in flight.
           ? `${t("voiceCall.hint")} · ${t("voiceCall.askingPi")}`
           : t("voiceCall.hint");
+  // The unread count rides along wherever the call is: it is how a missed announcement
+  // stays unmissable even when the answer itself was never spoken.
+  const statusText = unreadLabel ? `${statusLine} · ${unreadLabel}` : statusLine;
 
   if (collapsed) {
     return (
@@ -461,7 +526,7 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" />
         </svg>
-        {piBusy ? t("voiceCall.askingPi") : t("voiceCall.title")}
+        {piBusy ? t("voiceCall.askingPi") : unreadLabel || t("voiceCall.title")}
       </button>
     );
   }
@@ -484,7 +549,7 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
           {statusDot}
           <strong style={{ fontSize: 14 }}>{t("voiceCall.title")}</strong>
           <span style={{ fontSize: 12, color: "var(--text-muted)", marginLeft: "auto", marginRight: 4 }}>
-            {statusLine}
+            {statusText}
           </span>
           <button
             onClick={() => setCollapsed(true)}

@@ -847,6 +847,7 @@ export const enLocale: LocalePlugin = {
     "voiceCall.ignored": "not answered",
     "voiceCall.collapse": "Collapse",
     "voiceCall.expand": "Back to call",
+    "voiceCall.unread": "{count} unread",
     "chat.previewImage": "Preview image",
     "chat.filterModels": "Filter models…",
     "chat.modelScopeScoped": "scoped",

@@ -42,6 +42,12 @@ export interface DictationHandlers {
   onResponseStarted?: () => void;
   /** A response closed: completed | cancelled | failed | incomplete. */
   onResponseDone?: (status: string) => void;
+  /**
+   * A queued announcement was actually handed to the model — the moment it stops being owed.
+   * `tag` is whatever the caller attached to it; the voice layer passes its ledger entry id, so a
+   * replayed answer is marked read when it is spoken and stays unread across a hang-up.
+   */
+  onNoticeInjected?: (tag: string) => void;
 }
 
 export interface WsLike {
@@ -112,8 +118,8 @@ export class RealtimeDictationClient {
   private readonly openCalls = new Set<string>();
   /** A reply is due as soon as the way clears. */
   private owed = false;
-  /** Out-of-band announcements to speak, oldest first. */
-  private readonly notices: string[] = [];
+  /** Out-of-band announcements to speak, oldest first, each with the tag its caller asked back. */
+  private readonly notices: { text: string; tag: string }[] = [];
   /** The user is mid-sentence: hold an announcement until they finish. */
   private speaking = false;
 
@@ -224,15 +230,15 @@ export class RealtimeDictationClient {
    * minutes after the tool call that started it — so the conversation stays
    * open while the work runs, and is told about it when the user next stops.
    */
-  notify(text: string): void {
+  notify(text: string, tag = ""): void {
     const trimmed = text.trim();
     if (!trimmed) return;
     if (!this.gate) {
-      this.injectNotice(trimmed);
+      this.injectNotice(trimmed, tag);
       this.requestReply();
       return;
     }
-    this.notices.push(trimmed);
+    this.notices.push({ text: trimmed, tag });
     this.replyWhenClear();
   }
 
@@ -241,7 +247,7 @@ export class RealtimeDictationClient {
     this.notices.length = 0;
   }
 
-  private injectNotice(text: string): void {
+  private injectNotice(text: string, tag: string): void {
     this.sendEvent({
       type: "conversation.item.create",
       item: {
@@ -250,6 +256,7 @@ export class RealtimeDictationClient {
         content: [{ type: "input_text", text: `${BACKGROUND_EVENT_PREFIX} ${text}` }],
       },
     });
+    this.handlers.onNoticeInjected?.(tag);
   }
 
   /** Send the next owed reply, but only where a response can be created. */
@@ -260,7 +267,7 @@ export class RealtimeDictationClient {
     if (notice === undefined && !this.owed) return;
     if (notice !== undefined) {
       this.notices.shift();
-      this.injectNotice(notice);
+      this.injectNotice(notice.text, notice.tag);
     }
     // One reply covers the announcement and anything the user said around it.
     this.owed = false;
