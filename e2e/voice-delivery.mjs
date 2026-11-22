@@ -20,6 +20,12 @@
 //
 // Runs against a *deployed* pi-web: it restarts the moment this script finishes, so point it at
 // the build you intend to ship.
+//
+// The speech leg drives the pipeline with the *plain* voice settings — it does not install the
+// panel's `ask_pi` tool or the voice-layer instructions — so what it times is "end of utterance to
+// first audible frame" for a chit-chat reply (measured 2026-11-22: 3.6–4.7 s, median 4.2 s, against
+// a 2.82 s figure inside the server and an industry target near 0.5–0.8 s). The delegation path is
+// judged by the protocol leg, which does carry the requestId and reads the same events the page does.
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -268,28 +274,42 @@ async function runSpeechCase(text) {
     ws.addEventListener("error", () => { clearTimeout(deadline); reject(new Error("realtime connect failed")); });
   });
 
-  const finished = new Promise((resolve) => {
-    const sendNext = async () => {
+  const finished = new Promise((resolve) => {    const timer = setTimeout(() => resolve(), 25_000);
+    let dones = 0;
+    ws.addEventListener("message", (raw) => {
+      let event;
+      try { event = JSON.parse(raw.data); } catch { return; }
+      if (event.type === "conversation.item.input_audio_transcription.completed") {
+        result.transcript = String(event.transcript ?? "");
+        // The server will not generate on its own with `create_response: false` — the page's gate
+        // asks after accepting a turn, and so does the harness, or nothing here is ever spoken.
+        ws.send(JSON.stringify({ type: "response.create" }));
+      }
+      if (event.type === "response.function_call_arguments.done") {
+        try { result.toolQuestion = String(JSON.parse(event.arguments ?? "{}").question ?? ""); } catch { /* not ask_pi */ }
+        // Mirror `ask_pi`'s immediate answer, then ask again: the spoken reply to that is the
+        // number the ADR wants (the panel does exactly this in `startPiJob`).
+        ws.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: { type: "function_call_output", call_id: event.call_id, output: JSON.stringify({ state: "started", question: result.toolQuestion }) },
+        }));
+        ws.send(JSON.stringify({ type: "response.create" }));
+      }
+      if (event.type === "response.output_audio.delta" && result.firstAudioMs === null && lastFrameAt) {
+        result.firstAudioMs = Date.now() - lastFrameAt;
+      }
+      if (event.type === "response.done") {
+        dones += 1;
+        if (result.firstAudioMs !== null || dones >= 2) { clearTimeout(timer); resolve(); }
+      }
+    });
+    void (async () => {
       for (const frame of frames) {
         ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: frame }));
         lastFrameAt = Date.now();
         await sleep(100); // pace like a live microphone: the server reads audio time, not arrival bursts
       }
-    };
-    const timer = setTimeout(() => resolve(), 25_000);
-    ws.addEventListener("message", (raw) => {
-      let event;
-      try { event = JSON.parse(raw.data); } catch { return; }
-      if (event.type === "conversation.item.input_audio_transcription.completed") result.transcript = String(event.transcript ?? "");
-      if (event.type === "response.function_call_arguments.done") {
-        try { result.toolQuestion = String(JSON.parse(event.arguments ?? "{}").question ?? ""); } catch { /* not ask_pi */ }
-      }
-      if (event.type === "response.output_audio.delta" && result.firstAudioMs === null && lastFrameAt) {
-        result.firstAudioMs = Date.now() - lastFrameAt;
-      }
-      if (event.type === "response.done" && result.transcript) { clearTimeout(timer); resolve(); }
-    });
-    void sendNext().catch((error) => { result.error = String(error); clearTimeout(timer); resolve(); });
+    })().catch((error) => { result.error = String(error); clearTimeout(timer); resolve(); });
   });
   await finished;
   try { ws.close(); } catch { /* already gone */ }
