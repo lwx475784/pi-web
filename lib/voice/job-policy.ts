@@ -82,3 +82,23 @@ export function decideStop(scope: StopScope, ctx: StopContext): StopAction {
   }
   return ctx.ownsRun ? "cancel-ask" : "explain-queued";
 }
+
+/** Whether a spoken ask may touch the world, or has to be read back first. */
+export type MutatingAction = "dispatch" | "confirm-first";
+
+/**
+ * A request that changes something gets one spoken read-back per call (ADR 0008 #6). Transcription
+ * hears "先别" as "先把", and the cost of doing something nobody meant — a restart, a commit, a
+ * deletion — is paid by the room, not by the sentence. A class confirmed once stays confirmed for
+ * the rest of the call, because asking twice about the same kind of action is how people stop
+ * using voice at all; hanging up resets it.
+ */
+export function decideMutating(mutating: boolean, confirmed: boolean, classAlreadyConfirmed: boolean): MutatingAction {
+  if (!mutating) return "dispatch";
+  return confirmed || classAlreadyConfirmed ? "dispatch" : "confirm-first";
+}
+
+/** Whether a full-session stop has been offered and not yet answered. */
+export function stopConfirmationIsLive(armedUntil: number, now: number): boolean {
+  return armedUntil > now;
+}

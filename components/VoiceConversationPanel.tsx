@@ -9,10 +9,11 @@ import { getEventStreamEnabled, getGateSensitivity, getRealtimeUrls, getWakeWord
 import { classifyTurn, createNearSpeechGate, type NearGateHandle } from "@/lib/voice/turn-gate";
 import { askPiReply, createRequestId, isPiRequestCancelled, readPiQueueCount, stopPiRun } from "@/lib/voice/pi-bridge";
 import { createRunEndWatcher, type RunEndWatcher } from "@/lib/voice/answer-watcher";
-import { decideAsk, decideStop, maySpeak, normalizeStopScope, type StopScope } from "@/lib/voice/job-policy";
+import { decideAsk, decideMutating, decideStop, maySpeak, normalizeStopScope, type StopScope } from "@/lib/voice/job-policy";
+import { classifyActivity, pickProgressClass, progressLine, PROGRESS_AFTER_MS, type ActivityState } from "@/lib/voice/progress-copy";
 import { createLeaseClient } from "@/lib/voice/lease-client";
-import { markAnnouncementsRead, readLedger, recordAnnouncement } from "@/lib/voice/ledger-api";
-import { appendCallTurn, buildReplayMessage, loadCallHistory, migrateCallHistory, type CallTurn } from "@/lib/voice/call-history";
+import { clearLedger, markAnnouncementsRead, readLedger, recordAnnouncement } from "@/lib/voice/ledger-api";
+import { appendCallTurn, buildReplayMessage, clearCallHistory, loadCallHistory, migrateCallHistory, type CallTurn } from "@/lib/voice/call-history";
 import { useI18n } from "@/hooks/useI18n";
 
 interface Caption {
@@ -62,12 +63,14 @@ function thisDeviceLabel(): string {
 const ASK_PI_TOOL = {
   type: "function",
   name: "ask_pi",
-  description: "Hand work to the pi coding agent in this folder: their files, memory, projects, tools, history, or any task that takes real work. It answers seconds or minutes later, never inside this call: the result arrives as a message marked [background event]. One job at a time: while one runs the call answers {state:\"conflict\", running:[...]}, so ask the user whether to queue behind it (call again with when_busy=\"queue\") or stop it (stop_pi). A queued answer is written to the page as unread and is never spoken, because it cannot be matched back to your question.",
+  description: "Hand work to the pi coding agent in this folder: their files, memory, projects, tools, history, or any task that takes real work. It answers seconds or minutes later, never inside this call: the result arrives as a message marked [background event]. One job at a time: while one runs the call answers {state:\"conflict\", running:[...]}, so ask the user whether to queue behind it (call again with when_busy=\"queue\") or stop it (stop_pi). A queued answer is written to the page as unread and is never spoken, because it cannot be matched back to your question. Set mutating=true when the request changes something (writing files, committing, restarting or stopping a service, deleting, sending anything): unless the user has already agreed in this call, the tool returns {state:\"needs_confirmation\"} and you read back what will happen in one line, then call again with confirmed=true if they agree.",
   parameters: {
     type: "object",
     properties: {
       question: { type: "string", description: "The request rephrased as fluent text in the language the user spoke, with speech-to-text errors fixed. Never translate it into another language." },
       when_busy: { type: "string", enum: ["queue"], description: "Pass only after the user agreed to wait behind the job already running." },
+      mutating: { type: "boolean", description: "true when this request changes state rather than only looking something up." },
+      confirmed: { type: "boolean", description: "true only when the user has just agreed to a change the tool asked you to confirm." },
     },
     required: ["question"],
   },
@@ -97,6 +100,7 @@ const VOICE_LAYER_INSTRUCTIONS = [
   "ask_pi answers {state:\"conflict\"} while a job runs. Ask the user in one line whether to queue behind it or stop it; never start a second job on your own.",
   "A stop of the whole session is offered once and takes confirmed=true on the next call: repeat in one line what it costs, and only confirm if the user agrees.",
   "If the user says they are done hearing results, call stop_pi with scope=\"announcements\": pi keeps working and the answers stay unread on the page.",
+  "A request that changes something (write, commit, restart, delete, send) is confirmed first: the tool says {state:\"needs_confirmation\"}, you read back the action in one line, and you call again with confirmed=true only if the user agrees. Reading something up needs no confirmation.",
   "If the user says to stop or forget what pi is looking up, call stop_pi.",
   "Answer greetings and small talk yourself.",
   "Always reply in Chinese, at most two short sentences.",
@@ -159,6 +163,12 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
   /** This call's identity in the one-line lease, and the lease client while the call lives. */
   const [leaseOwnerId] = useState(createRequestId);
   const leaseRef = useRef<ReturnType<typeof createLeaseClient> | null>(null);
+  /** "重启服务" confirmed once in this call is confirmed; a new call asks again (ADR 0008 #6). */
+  const confirmedMutatingRef = useRef(false);
+  /** What pi is doing right now, so a long ask can say something true and coarse. */
+  const activityRef = useRef<ActivityState | null>(null);
+  /** The one progress line each long ask is allowed. */
+  const progressTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const listRef = useRef<HTMLDivElement | null>(null);
   const seqRef = useRef(1);
   const meIdRef = useRef(0);
@@ -227,6 +237,19 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
       ? `（还有 ${snapshot.replay.more} 条没念，可在页面上看）`
       : "";
     clientRef.current?.notify(`上次通话没念的${newest.kind === "failure" ? "失败" : "回答"}：${newest.text}${more}`, newest.id);
+  }, []);
+
+  /**
+   * Forget this call: the transcript on screen, the stored turns, and the unread list that came
+   * with them. The ask itself stays in pi's session — this clears the call's memory, not the work.
+   */
+  const clearCall = useCallback((): void => {
+    setCaptions([]);
+    setUnreadCount(0);
+    const key = historyKeyRef.current;
+    if (key) clearCallHistory(key);
+    const sid = sessionRef.current;
+    if (sid) void clearLedger(sid).then(() => refreshUnreadRef.current(sid));
   }, []);
 
   /**
@@ -340,7 +363,14 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
    */
   const getWatcher = useCallback((): RunEndWatcher | null => {
     if (!getEventStreamEnabled()) return null;
-    if (!watcherRef.current) watcherRef.current = createRunEndWatcher();
+    if (!watcherRef.current) {
+      watcherRef.current = createRunEndWatcher({
+        onEvent: (event) => {
+          const cls = classifyActivity(event);
+          if (cls) activityRef.current = { cls, at: Date.now() };
+        },
+      });
+    }
     return watcherRef.current;
   }, []);
 
@@ -353,6 +383,14 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
     jobsRef.current.set(callId, piJob);
     setPiBusy(true);
     setCaptions((prev) => [...prev, { id: captionId, who: "pi", text: `… ${question}` }]);
+    // One coarse line after two minutes, so a long ask is not indistinguishable from a hang
+    // (ADR 0008 #9): once per ask, never to a silenced call, and gone as soon as it settles.
+    const began = Date.now();
+    progressTimersRef.current.set(callId, setTimeout(() => {
+      progressTimersRef.current.delete(callId);
+      if (!jobsRef.current.has(callId) || announcementsMutedRef.current) return;
+      clientRef.current?.notify(progressLine(Date.now() - began, pickProgressClass(activityRef.current)), "");
+    }, PROGRESS_AFTER_MS));
     void (async () => {
       // The call is answered before pi starts: while a function call is open the
       // voice layer cannot generate anything, so waiting on pi is what silence
@@ -376,6 +414,11 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
         answer = `pi: ${(e as Error)?.message ?? "failed"}`;
       }
       const job = jobsRef.current.get(callId);
+      const progress = progressTimersRef.current.get(callId);
+      if (progress !== undefined) {
+        clearTimeout(progress);
+        progressTimersRef.current.delete(callId);
+      }
       if (!job || job.cancelled) return;
       jobsRef.current.delete(callId);
       if (jobsRef.current.size === 0) setPiBusy(false);
@@ -512,6 +555,17 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
           }), true);
           return;
         }
+        // A request that changes something is read back before it runs, once per class per call
+        // (ADR 0008 #6): transcription hears "先别重启" as "先把重启"，and the room pays for it.
+        if (decideMutating(args.mutating === true, args.confirmed === true, confirmedMutatingRef.current) === "confirm-first") {
+          client.sendFunctionOutput(callId, JSON.stringify({
+            state: "needs_confirmation",
+            question,
+            instruction: "say in one line what will change, and call ask_pi again with confirmed=true only if the user agrees",
+          }), true);
+          return;
+        }
+        if (args.mutating === true) confirmedMutatingRef.current = true;
         startPiJobRef.current(callId, question, action === "queue");
       },
       onError: (e) => {
@@ -596,6 +650,8 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
     return () => {
       disposed = true;
       clientRef.current = null;
+      for (const timer of progressTimersRef.current.values()) clearTimeout(timer);
+      progressTimersRef.current.clear();
       const heldLease = leaseRef.current;
       leaseRef.current = null;
       heldLease?.stop();
@@ -714,6 +770,16 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
           <span style={{ fontSize: 12, color: "var(--text-muted)", marginLeft: "auto", marginRight: 4 }}>
             {statusText}
           </span>
+          <button
+            onClick={clearCall}
+            aria-label={t("voiceCall.clear")}
+            title={t("voiceCall.clear")}
+            style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 4, borderRadius: 6, display: "flex" }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" />
+            </svg>
+          </button>
           <button
             onClick={() => setCollapsed(true)}
             aria-label={t("voiceCall.collapse")}

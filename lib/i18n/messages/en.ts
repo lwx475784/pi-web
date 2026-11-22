@@ -852,6 +852,7 @@ export const enLocale: LocalePlugin = {
     "voiceCall.takeover": "Voice was taken over by {holder}",
     "voiceCall.disconnected": "The voice connection dropped",
     "voiceCall.stalled": "The voice server stopped answering; this call ended",
+    "voiceCall.clear": "Clear this call's history",
     "chat.previewImage": "Preview image",
     "chat.filterModels": "Filter models…",
     "chat.modelScopeScoped": "scoped",

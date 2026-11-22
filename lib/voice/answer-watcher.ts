@@ -45,6 +45,12 @@ export interface RunEndWatcherOptions {
   streamUrl?(sessionId: string): string;
   /** How long a stream may stay silent before its waits are written off. Tests shorten it. */
   streamDeadMs?: number;
+  /**
+   * Every parsed event, including the ones no waiter names. The voice layer uses this to know what
+   * pi is doing while a long ask runs — one progress line needs an activity, not a run boundary —
+   * and it must not need a second stream to learn it.
+   */
+  onEvent?(event: AgentEventLike): void;
 }
 
 /**
@@ -134,6 +140,7 @@ export function createRunEndWatcher(opts: RunEndWatcherOptions = {}): RunEndWatc
       } catch {
         return;
       }
+      opts.onEvent?.(parsed);
       for (const waiter of [...stream.waiters]) {
         if (parsed.type === "user_message_entry" && parsed.requestId === waiter.requestId) {
           if (typeof parsed.entryId === "string") waiter.anchorEntryId = parsed.entryId;

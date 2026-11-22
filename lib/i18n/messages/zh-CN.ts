@@ -852,6 +852,7 @@ export const zhCNLocale: LocalePlugin = {
     "voiceCall.takeover": "语音已交给 {holder}",
     "voiceCall.disconnected": "语音连接已断开",
     "voiceCall.stalled": "语音服务不再回应，这通电话结束了",
+    "voiceCall.clear": "清除本通话记录",
     "chat.previewImage": "预览图片",
     "chat.filterModels": "筛选模型…",
     "chat.modelScopeScoped": "已限定",
