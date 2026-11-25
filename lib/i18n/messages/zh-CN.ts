@@ -25,6 +25,7 @@ export const zhCNLocale: LocalePlugin = {
     "settings.voiceGateHint": "0 全收，100 只收贴着嘴说的话。客厅的声音漏进来就调高；下一通电话生效。",
     "settings.voiceWake": "叫名字才回答",
     "settings.voiceWakePlaceholder": "称呼，留空就什么都答",
+    "settings.voiceWakeHint": "只有说到这个名字的那句话才会回应，其余照常显示但不作答。留空就什么都答。",
     "settings.chatContentWidth": "聊天内容宽度",
     "settings.chatContentFontSize": "聊天和终端字体大小",
     "settings.typography": "字体与排版",

@@ -25,6 +25,7 @@ export const enLocale: LocalePlugin = {
     "settings.voiceGateHint": "0 uploads every voice in the house, 100 only speech at the mouth. Raise it when the next room leaks in; it applies to the next call.",
     "settings.voiceWake": "Only answer when named",
     "settings.voiceWakePlaceholder": "Name, empty answers anything",
+    "settings.voiceWakeHint": "The call answers only turns that say this name; the rest are shown but never answered. Empty answers anything.",
     "settings.chatContentWidth": "Chat content width",
     "settings.chatContentFontSize": "Chat & terminal font size",
     "settings.typography": "Fonts & layout",

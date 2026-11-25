@@ -75,49 +75,60 @@ export function VoiceInputSettings() {
           <span className="settings-send-mode-label">{t("settings.voiceEnabled")}</span>
         </label>
       </div>
-      <input
-        className="model-context-input"
-        type="text"
-        inputMode="url"
-        spellCheck={false}
-        value={url}
-        placeholder={DEFAULT_REALTIME_URLS[0]}
-        aria-label={t("settings.voiceUrl")}
-        onChange={(event) => setUrl(event.target.value)}
-        onBlur={saveUrl}
-        onKeyDown={(event) => { if (event.key === "Enter") saveUrl(); }}
-      />
+
+      <label className="settings-voice-row">
+        <span className="settings-voice-label">{t("settings.voiceUrl")}</span>
+        <input
+          className="settings-voice-input"
+          type="text"
+          inputMode="url"
+          spellCheck={false}
+          value={url}
+          placeholder={DEFAULT_REALTIME_URLS[0]}
+          aria-label={t("settings.voiceUrl")}
+          onChange={(event) => setUrl(event.target.value)}
+          onBlur={saveUrl}
+          onKeyDown={(event) => { if (event.key === "Enter") saveUrl(); }}
+        />
+      </label>
       {enabled && savedUrl === "" && (
         <p className="settings-general-description">{t("settings.voiceDefaultUrls", { urls: DEFAULT_REALTIME_URLS.join(" · ") })}</p>
       )}
-      <label className="settings-send-mode-option">
-        <span className="settings-send-mode-label">{t("settings.voiceGate")}</span>
+
+      <label className="settings-voice-row">
+        <span className="settings-voice-label">{t("settings.voiceGate")}</span>
         <input
+          className="settings-voice-slider"
           type="range"
           min={0}
           max={100}
           step={5}
           value={sensitivity}
           aria-label={t("settings.voiceGate")}
+          aria-describedby="settings-voice-gate-hint"
           onChange={(event) => changeSensitivity(Number(event.target.value))}
         />
-        <span className="settings-send-mode-label">{sensitivity}</span>
+        <span className="settings-voice-value" aria-hidden="true">{sensitivity}</span>
       </label>
-      <p className="settings-general-description">{t("settings.voiceGateHint")}</p>
-      <label className="settings-send-mode-option">
-        <span className="settings-send-mode-label">{t("settings.voiceWake")}</span>
+      <p id="settings-voice-gate-hint" className="settings-general-description">{t("settings.voiceGateHint")}</p>
+
+      <label className="settings-voice-row">
+        <span className="settings-voice-label">{t("settings.voiceWake")}</span>
         <input
-          className="model-context-input"
+          className="settings-voice-input"
           type="text"
           spellCheck={false}
           value={wake}
           placeholder={t("settings.voiceWakePlaceholder")}
           aria-label={t("settings.voiceWake")}
+          aria-describedby="settings-voice-wake-hint"
           onChange={(event) => setWake(event.target.value)}
           onBlur={saveWake}
           onKeyDown={(event) => { if (event.key === "Enter") saveWake(); }}
         />
       </label>
+      <p id="settings-voice-wake-hint" className="settings-general-description">{t("settings.voiceWakeHint")}</p>
+
       {(support === "insecure" || support === "no-mic") && (
         <p role="alert" className="settings-general-error">{t("settings.voiceUnavailable")}</p>
       )}

@@ -25,6 +25,7 @@ export const zhTWLocale: LocalePlugin = {
     "settings.voiceGateHint": "0 全收，100 只收貼著嘴說的話。客廳的聲音漏進來就調高；下一通電話生效。",
     "settings.voiceWake": "叫名字才回答",
     "settings.voiceWakePlaceholder": "稱呼，留空就什麼都答",
+    "settings.voiceWakeHint": "只有說到這個名字的那句話才會回應，其餘照常顯示但不作答。留空就什麼都答。",
     "settings.chatContentWidth": "聊天內容寬度",
     "settings.chatContentFontSize": "聊天和終端字體大小",
     "settings.typography": "字體與排版",
