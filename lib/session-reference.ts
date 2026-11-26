@@ -7,11 +7,16 @@
  * `grep` tools reach directly. pi-web renders such a link in the sent message
  * (components/MarkdownBody.tsx → lib/file-links.ts), so the path hides behind
  * the title there and stays in the prompt text for the model.
+ *
+ * **Browser-safe: this module is imported by a client component.** `lib/paths.ts`
+ * is the repo's path helper but pulls in `fs` and `path`, and webpack fails the
+ * production build on either one inside a client module (`npm test` and
+ * `tsc --noEmit` never see it). Hence the one slash conversion below is written
+ * here rather than imported; `lib/session-reference.test.mjs` keeps it that way.
  */
 
 import { quoteSeparator } from "./quoted-selection";
 import { sessionDisplayTitle } from "./session-fork-name";
-import { toSlashPath } from "./paths";
 
 export interface SessionReferenceInput {
   id: string;
@@ -40,12 +45,14 @@ export function escapeMarkdownLinkText(text: string): string {
  *
  * A Windows path goes to slashes: a backslash destination keeps no href in
  * pi-web's Markdown (docs/agents/sessions.md, "Windows Markdown file links"),
- * and pi itself gives the model forward slashes. A destination that a bare one
- * cannot hold — whitespace, parentheses or angle brackets (CommonMark) — goes
- * between `<` and `>`, which is the same file to the reader either way.
+ * and pi itself gives the model forward slashes — `lib/paths.ts`'s `toSlashPath`
+ * is the same replace, and only that, so it is written here rather than imported
+ * from a module that reads `fs`. A destination that a bare one cannot hold —
+ * whitespace, parentheses or angle brackets (CommonMark) — goes between `<` and
+ * `>`, which is the same file to the reader either way.
  */
 export function sessionFileHref(path: string): string {
-  const filePath = /^[A-Za-z]:[\\/]/.test(path) ? toSlashPath(path) : path;
+  const filePath = /^[A-Za-z]:[\\/]/.test(path) ? path.replace(/\\/g, "/") : path;
   return /[\s()<>]/.test(filePath)
     ? `<${filePath.replace(/[<>\\]/g, "\\$&")}>`
     : filePath;
