@@ -9,6 +9,9 @@ const FORBIDDEN_COMMANDS = new Set(["prompt", "steer", "follow_up", "fork", "for
 
 export async function checkSessionNavigation({ browser, base, artifacts, a, b, api, deleteSession }) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
+  // "Copy session ID" writes the clipboard and the check reads it back; headless
+  // Chromium grants the write but needs the read asked for.
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
   await context.tracing.start({ screenshots: true, snapshots: true });
   const errors = [];
   const watch = (target) => {
@@ -147,7 +150,11 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     const items = (await menu.getByRole("menuitem").allInnerTexts()).map((text) => text.split("\n")[0].trim());
     // After the actions that manage the session, just before Delete; never first (it would take the focus).
     assert.deepEqual(items.slice(-2), ["Open in new tab", "Delete…"], `menu items: ${items.join(" | ")}`);
-    assert.equal(items[items.length - 3], "Archive", `menu items: ${items.join(" | ")}`);
+    // Copy session ID goes with the two that only take the row somewhere else,
+    // and Reference goes with Fork, among the actions on the session's content.
+    assert.deepEqual(items.slice(-4, -2), ["Copy session ID", "Open in new tab"], `menu items: ${items.join(" | ")}`);
+    assert.equal(items[items.length - 5], "Archive", `menu items: ${items.join(" | ")}`);
+    assert.equal(items.indexOf("Reference in this chat"), items.indexOf("Fork") + 1, `menu items: ${items.join(" | ")}`);
     let tab = await newTab(() => menu.getByRole("menuitem", { name: /^Open in new tab/ }).click());
     await expectShows(tab, b.id);
     await expectShows(page, a.id);
@@ -160,6 +167,63 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     await expectShows(tab, b.id);
     await expectShows(page, a.id);
     console.log("PASS: right-click and ⋯ menus open the clicked row's session in a new tab (click and T)");
+
+    // The two new entries. "Copy session ID" (C) puts that row's id on the
+    // clipboard; "Reference in this chat" (Q) puts one Markdown line naming that
+    // session's own transcript file into the composer of the session this tab has
+    // open. Neither opens a session, moves the cwd, or asks the server for
+    // anything — the `forbidden` watch below proves the last, `expectShows` the
+    // first two. C and Q are the menu's type-ahead letters.
+    const composer = page.locator(".chat-input-textarea");
+    const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const referencePattern = (title) => new RegExp(
+      `^\\[Reference session "${escapeRe(title)}"\\]\(/.+_${escapeRe(b.id)}\\.jsonl\\)$`,
+    );
+    await composer.fill("");
+    const rowTitle = (await row(page, b.id).locator(".session-tree-title").innerText()).trim();
+    await row(page, b.id).hover();
+    await row(page, b.id).getByRole("button", { name: "More actions" }).click();
+    await menu.waitFor();
+    await page.keyboard.press("q");
+    assert.match(await composer.inputValue(), referencePattern(rowTitle), "the reference line lands in the open session's composer");
+    // The line is the feedback, so it takes the caret: the menu returns focus to
+    // its opener only while focus is still inside the menu or on the page.
+    assert.ok(
+      await page.evaluate(() => document.activeElement?.classList.contains("chat-input-textarea") === true),
+      "the reference hands the caret to the composer",
+    );
+    // Still A: same URL, same selected row, A's own message on screen.
+    await expectShows(page, a.id);
+    console.log("PASS: the row menu's Reference line goes into the open composer without opening the row");
+
+    await row(page, b.id).hover();
+    await row(page, b.id).getByRole("button", { name: "More actions" }).click();
+    await menu.waitFor();
+    await page.keyboard.press("c");
+    const toast = page.getByText("Copied session ID", { exact: false });
+    await toast.waitFor({ state: "visible" });
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), b.id, "the clipboard holds that row's id alone");
+    assert.equal(new URL(page.url()).searchParams.get("session"), a.id, "copying changes nothing else");
+    console.log("PASS: the row menu's Copy session ID puts the bare id on the clipboard and says so");
+
+    // On a phone the insert cannot show itself, so the drawer closes instead
+    // (and never autofocuses the composer, which would raise the keyboard).
+    await composer.fill("");
+    await page.setViewportSize({ width: 390, height: 844 });
+    try {
+      const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
+      await showSidebar.click();
+      await row(page, b.id).hover();
+      await row(page, b.id).getByRole("button", { name: "More actions" }).click();
+      await menu.waitFor();
+      await menu.getByRole("menuitem", { name: /^Reference in this chat/ }).click();
+      await showSidebar.waitFor({ state: "visible" });
+      assert.match(await composer.inputValue(), referencePattern(rowTitle), "the reference line lands at a phone width too");
+      await composer.fill("");
+      console.log("PASS: at a phone width the reference closes the drawer and still lands in the composer");
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
 
     // Each tab keeps its own session through a reload, and an explicit
     // ?session= wins over the other tab's memory. The original tab reloads

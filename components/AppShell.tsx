@@ -31,6 +31,11 @@ import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
+import {
+  isBashDraft,
+  referenceDraftValue,
+  sessionReferenceMarkdown,
+} from "@/lib/session-reference";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import {
@@ -44,7 +49,7 @@ import type { DebugClientSession } from "@/lib/debug-types";
 import { getInitialNavigation, linkedSessionId, withTabOpen } from "@/lib/initial-navigation";
 import { clearTabOpenSession, getTabOpen, setTabOpenNewSession, setTabOpenSession } from "@/lib/tab-session";
 import { mergeCatalogRow } from "./session-catalog-helpers";
-import { clearDraft, getDraft, parkedNewSessionDraftKey, rekeyDraft } from "@/lib/draft-store";
+import { clearDraft, getDraft, parkedNewSessionDraftKey, rekeyDraft, setDraft } from "@/lib/draft-store";
 import {
   contextForCwd,
   type NewSessionContext,
@@ -1521,6 +1526,40 @@ export function AppShell() {
     activeNewSessionDraftKeyRef.current = newSessionDraftKey;
   }, [newSessionDraftKey]);
 
+  /**
+   * The sidebar row menu's "Reference in this chat": one line naming that
+   * session's own transcript file, into the composer that is open. Nothing
+   * opens and no cwd moves — a row still opens on a click, and this is the
+   * menu's way of pointing at a session from where the user already is.
+   *
+   * The line is Markdown text (`[引用会话「title」](/abs/x.jsonl)`) because the
+   * composer is a plain textarea: the model gets the path its `read` and `grep`
+   * tools reach, and pi-web folds it into a link in the sent message
+   * (lib/file-links.ts). A draft that is a `!` shell command takes it as typed
+   * text, since a blank line inside a command reaches the shell; with the
+   * composer unmounted (the loading screen a session switch shows) it lands in
+   * the draft store instead, so it waits where the line would have.
+   */
+  const handleReferenceSession = useCallback((session: SessionInfo) => {
+    const line = sessionReferenceMarkdown(session, (title) => translate("sidebar.referenceSessionLabel", { title }));
+    const draftKey = selectedSession?.id ?? newSessionDraftKey ?? undefined;
+    const draft = draftKey ? getDraft(draftKey) : null;
+    const input = chatInputRef.current;
+    if (!input) {
+      if (draftKey) setDraft(draftKey, { value: referenceDraftValue(draft, line), images: draft?.images ?? [] });
+      return;
+    }
+    if (isBashDraft(draft)) input.insertText(line);
+    else input.insertQuote(line);
+    // The inserted line is the feedback, so it gets the caret. Taking focus
+    // here also holds it: the menu gives focus back to its opener only while
+    // focus is still inside the menu or on the page (components/SidebarMenu.tsx).
+    // A phone never autofocuses a composer (the keyboard would come up
+    // uninvited, #1012); its drawer closes so the composer is on screen.
+    if (isMobile) setSidebarOpen(false);
+    else input.focus();
+  }, [isMobile, newSessionDraftKey, selectedSession?.id, translate]);
+
   // The bar above a fresh composer. Only a fresh composer moves, and only
   // somewhere else: the folder in use would remount it for nothing. The
   // control the move came from takes focus in the bar of the new composer.
@@ -1666,6 +1705,7 @@ export function AppShell() {
         selectedSessionId={selectedSession?.id ?? null}
         onSelectSession={handleSelectSession}
         onSelectSideChat={handleSelectSideChat}
+        onReferenceSession={handleReferenceSession}
         onNewSession={handleNewSession}
         controlRef={sidebarControlRef}
         onNewSessionContextChange={handleSidebarNewSessionContext}

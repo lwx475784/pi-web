@@ -538,3 +538,30 @@ test("every way of opening a session reveals its row through one effect keyed on
   // Only the open session's effect and a moved group ask the main tree for a row.
   assert.equal(source.match(/\bsetTreeReveal\(\{/g)?.length, 2);
 });
+
+test("the row menu's two new entries reach the session's own file, and open nothing", () => {
+  const dispatch = between("const runSessionAction = ", "\n  const openRowMenu = ");
+  // Reference hands out the family's root (subagents and side chats fold into
+  // that row, so the row stands for that one session), and Copy puts that
+  // root's id on the clipboard alone, so what arrives elsewhere is just the id.
+  assert.match(dispatch, /case "reference": onReferenceSession\(family\.root\); break;/);
+  assert.match(dispatch, /case "copy-id": copyFamilyId\(family\); break;/);
+  // Neither opens the session nor moves the sidebar's cwd: a row still opens on
+  // a click, and these two only take the row somewhere else.
+  assert.doesNotMatch(dispatch, /onSelectSession|setSelectedCwd|handleSelectFamily/);
+
+  const copy = callbackBody("copyFamilyId");
+  assert.match(copy, /copyText\(root\.id\)/);
+  // Both outcomes are handled: a refused copy cannot raise the dev overlay as an
+  // unhandled rejection, nor claim a copy that never happened (lib/clipboard.ts).
+  assert.match(copy, /\.then\(\s*\(\) => showToast\(t\("sidebar\.copiedSessionId"/);
+  assert.match(copy, /error: unknown\) => showToast\(t\("sidebar\.copySessionIdFailed"/);
+  // No file yet, nothing to copy (a transient row has no menu either).
+  assert.match(copy, /if \(root\.transient\) return;/);
+
+  // The labels: the session-info panel's own words for the same payload, and a
+  // menu label that says where the reference lands.
+  const labels = between("const SESSION_ACTION_LABEL_KEYS", "\nfunction sessionActionIcon");
+  assert.match(labels, /"copy-id": "session\.copyId",/);
+  assert.match(labels, /reference: "sidebar\.referenceSession",/);
+});

@@ -4,7 +4,13 @@
  * (nothing disk-backed for a transient session, archive disabled while a
  * family runs) are testable without a DOM. Fork leaves the source untouched
  * (it copies the finished entries of its current branch), so it is offered
- * everywhere: while the family runs and from the archive too. Open in new tab
+ * everywhere: while the family runs and from the archive too. Reference and
+ * Copy session ID split the same way: Reference reads the session's own file
+ * and writes nothing, so it sits with Fork and is offered while the family runs
+ * and from the archive; Copy session ID only takes the row somewhere else, so
+ * it sits with Open in new tab. Neither opens the session: a row still opens on
+ * a click, and a menu action never moves the cwd.
+ * Open in new tab
  * only navigates (a browser tab loads the session's link): it is offered
  * everywhere a saved session is, after the actions that manage the session and
  * before Delete. Never first: a menu's first item takes focus when it opens,
@@ -21,9 +27,11 @@ export type SessionMenuActionId =
   | "unpin"
   | "rename"
   | "fork"
+  | "reference"
   | "mark-read"
   | "mark-unread"
   | "archive"
+  | "copy-id"
   | "unarchive"
   | "delete";
 
@@ -43,12 +51,19 @@ export function sessionMenuEntries(
 ): SessionMenuEntry[] {
   if (status.transient) return [];
   const openNewTab: SessionMenuEntry = { kind: "action", id: "open-new-tab", shortcut: "T" };
+  // Neither of the two new entries touches the disk, so both are offered while
+  // the family runs and from the archive: one reference line for the session's
+  // own file, and its id.
+  const reference: SessionMenuEntry = { kind: "action", id: "reference", shortcut: "Q" };
+  const copyId: SessionMenuEntry = { kind: "action", id: "copy-id", shortcut: "C" };
   if (context === "archive") {
     return [
       { kind: "action", id: "unarchive", shortcut: "A" },
       { kind: "action", id: "pin", shortcut: "P" },
       { kind: "action", id: "rename", shortcut: "R" },
       { kind: "action", id: "fork", shortcut: "F" },
+      reference,
+      copyId,
       openNewTab,
       { kind: "separator" },
       { kind: "action", id: "delete", shortcut: "D" },
@@ -58,11 +73,13 @@ export function sessionMenuEntries(
     { kind: "action", id: context === "pinned" ? "unpin" : "pin", shortcut: "P" },
     { kind: "action", id: "rename", shortcut: "R" },
     { kind: "action", id: "fork", shortcut: "F" },
+    reference,
     { kind: "action", id: status.unread ? "mark-read" : "mark-unread", shortcut: "U" },
     // A running family would come straight back: archiving waits for the run.
     status.running
       ? { kind: "action", id: "archive", shortcut: "A", disabledReason: "running" }
       : { kind: "action", id: "archive", shortcut: "A" },
+    copyId,
     openNewTab,
     { kind: "separator" },
     { kind: "action", id: "delete", shortcut: "D" },

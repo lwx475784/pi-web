@@ -6,6 +6,7 @@ import { listSessionFamilies, type SessionFamily, isHiddenRelation } from "@/lib
 import { clearDraft } from "@/lib/draft-store";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { newSessionDeepLink, sessionDeepLink } from "@/lib/session-links";
+import { copyText } from "@/lib/clipboard";
 import { getProjectActivity, getRecentProjects } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import {
@@ -114,6 +115,7 @@ import {
   ChangesIcon,
   CheckIcon,
   ChevronIcon,
+  CopyIcon,
   DotIcon,
   DotOutlineIcon,
   EyeIcon,
@@ -126,6 +128,7 @@ import {
   PinIcon,
   PinOffIcon,
   PlusIcon,
+  QuoteIcon,
   RefreshIcon,
   RestoreIcon,
   SearchIcon,
@@ -222,6 +225,8 @@ interface Props {
   onSelectSideChat: (session: SessionInfo) => void;
   /** projectKey: the target's project identity when it is known (a group's "+", the composer's bar). */
   onNewSession?: (sessionId: string, cwd: string, projectKey?: string | null, options?: NewSessionOptions) => void;
+  /** "Reference in this chat": the row's session as one line in the composer that is open. It opens nothing and moves no cwd. */
+  onReferenceSession: (session: SessionInfo) => void;
   /** What the bar above a fresh composer moves through (`SessionSidebarControl`). */
   controlRef?: Ref<SessionSidebarControl>;
   /** The sidebar's cwd as the bar above a fresh composer shows it; reported when that changes. */
@@ -358,9 +363,12 @@ const SESSION_ACTION_LABEL_KEYS: Record<SessionMenuActionId, string> = {
   unpin: "sidebar.unpin",
   rename: "sidebar.rename",
   fork: "sidebar.fork",
+  reference: "sidebar.referenceSession",
   "mark-read": "sidebar.markRead",
   "mark-unread": "sidebar.markUnread",
   archive: "sidebar.archive",
+  // The session-info panel's own words for the same payload: the row's id.
+  "copy-id": "session.copyId",
   unarchive: "sidebar.unarchive",
   delete: "sidebar.delete",
 };
@@ -372,6 +380,8 @@ function sessionActionIcon(id: SessionMenuActionId): ReactNode {
     case "unpin": return <PinOffIcon />;
     case "rename": return <PencilIcon />;
     case "fork": return <ForkIcon />;
+    case "reference": return <QuoteIcon />;
+    case "copy-id": return <CopyIcon />;
     case "mark-read": return <DotOutlineIcon />;
     case "mark-unread": return <DotIcon />;
     case "archive": return <ArchiveIcon />;
@@ -518,7 +528,7 @@ function buttonAnchor(element: HTMLElement, align: "start" | "end"): SidebarMenu
   return { kind: "rect", rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }, align };
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onSelectSideChat, onNewSession, controlRef, onNewSessionContextChange, initialSessionId, initialSessionLinked, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, hiddenFinishedSessionIds, onRunningSessionIdsChange, onSessionsChange }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onSelectSideChat, onReferenceSession, onNewSession, controlRef, onNewSessionContextChange, initialSessionId, initialSessionLinked, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, hiddenFinishedSessionIds, onRunningSessionIdsChange, onSessionsChange }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
@@ -2235,6 +2245,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onSelectSid
     window.open(sessionDeepLink(family.root.id), "_blank", "noopener,noreferrer");
   }, []);
 
+  /**
+   * Copy session ID: the row's own id, the same one the session-info panel
+   * offers for the open session. A refused copy says so — a page that is not a
+   * secure context copies through `execCommand`, which answers false once the
+   * click's user activation is old (lib/clipboard.ts), and a toast that then
+   * claimed "Copied" would be a lie about text that never left the page.
+   */
+  const copyFamilyId = useCallback((family: SessionFamily) => {
+    const root = family.root;
+    if (root.transient) return;
+    copyText(root.id).then(
+      () => showToast(t("sidebar.copiedSessionId", { title: shortTitle(sessionRowTitle(root), TOAST_TITLE_MAX) })),
+      (error: unknown) => showToast(t("sidebar.copySessionIdFailed", { error: error instanceof Error ? error.message : String(error) })),
+    );
+  }, [showToast, t]);
+
   const runSessionAction = (id: SessionMenuActionId, row: SessionRow, shiftKey: boolean) => {
     const { family } = row;
     switch (id) {
@@ -2243,6 +2269,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onSelectSid
       case "unpin": setFamilyPinned(family, false); break;
       case "rename": startRename(family); break;
       case "fork": void forkFamily(row); break;
+      case "reference": onReferenceSession(family.root); break;
+      case "copy-id": copyFamilyId(family); break;
       case "mark-read": markFamilyRead(family, true); break;
       case "mark-unread": markFamilyRead(family, false); break;
       case "archive": archiveFamily(family); break;
