@@ -1528,22 +1528,36 @@ export function AppShell() {
 
   /**
    * The sidebar row menu's "Reference in this chat": one line naming that
-   * session's own transcript file, into the composer that is open. Nothing
-   * opens and no cwd moves — a row still opens on a click, and this is the
-   * menu's way of pointing at a session from where the user already is.
+   * session's own transcript file, into the **main chat's** composer — the page's
+   * session, which is what its URL, its selected row and its global shortcuts all
+   * follow. A side chat's or a subagent's right-panel tab keeps a composer of its
+   * own (`components/SessionChatPanel.tsx`) and is deliberately not the target:
+   * no other page-level action follows the open tab, and a row's own session is
+   * the family the main chat belongs to. Nothing opens and no cwd moves — a row
+   * still opens on a click, and this is the menu's way of pointing at a session
+   * from where the user already is.
    *
    * The line is Markdown text (`[引用会话「title」](/abs/x.jsonl)`) because the
    * composer is a plain textarea: the model gets the path its `read` and `grep`
    * tools reach, and pi-web folds it into a link in the sent message
    * (lib/file-links.ts). A draft that is a `!` shell command takes it as typed
-   * text, since a blank line inside a command reaches the shell; with the
-   * composer unmounted (the loading screen a session switch shows) it lands in
-   * the draft store instead, so it waits where the line would have.
+   * text, since a blank line inside a command reaches the shell; the draft is
+   * read from the store ChatInput keeps in step with its value on every change,
+   * and with the composer unmounted (the loading screen a session switch shows)
+   * that store is where the line goes, so it waits where it would have been.
    */
   const handleReferenceSession = useCallback((session: SessionInfo) => {
     const line = sessionReferenceMarkdown(session, (title) => translate("sidebar.referenceSessionLabel", { title }));
     const draftKey = selectedSession?.id ?? newSessionDraftKey ?? undefined;
     const draft = draftKey ? getDraft(draftKey) : null;
+    // The inserted line is the feedback, so on a phone the surfaces hiding the
+    // main composer close instead of a toast: the drawer, and a right-panel tab
+    // covering it (the tabs live in sessionStorage, so they come back). A phone
+    // never autofocuses a composer — the keyboard would come up uninvited (#1012).
+    if (isMobile) {
+      setSidebarOpen(false);
+      setRightPanelOpen(false);
+    }
     const input = chatInputRef.current;
     if (!input) {
       if (draftKey) setDraft(draftKey, { value: referenceDraftValue(draft, line), images: draft?.images ?? [] });
@@ -1551,13 +1565,10 @@ export function AppShell() {
     }
     if (isBashDraft(draft)) input.insertText(line);
     else input.insertQuote(line);
-    // The inserted line is the feedback, so it gets the caret. Taking focus
-    // here also holds it: the menu gives focus back to its opener only while
-    // focus is still inside the menu or on the page (components/SidebarMenu.tsx).
-    // A phone never autofocuses a composer (the keyboard would come up
-    // uninvited, #1012); its drawer closes so the composer is on screen.
-    if (isMobile) setSidebarOpen(false);
-    else input.focus();
+    // On a desktop the line gets the caret. Taking focus here also holds it: the
+    // menu gives focus back to its opener only while focus is still inside the
+    // menu or on the page (components/SidebarMenu.tsx).
+    if (!isMobile) input.focus();
   }, [isMobile, newSessionDraftKey, selectedSession?.id, translate]);
 
   // The bar above a fresh composer. Only a fresh composer moves, and only

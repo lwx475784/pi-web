@@ -1,7 +1,3 @@
-import { quoteSeparator } from "./quoted-selection";
-import { sessionDisplayTitle } from "./session-fork-name";
-import { toSlashPath } from "./paths";
-
 /**
  * A session row as one Markdown line that references it from another session's
  * composer (the sidebar row menu's "Reference in this chat").
@@ -13,11 +9,22 @@ import { toSlashPath } from "./paths";
  * the title there and stays in the prompt text for the model.
  */
 
+import { quoteSeparator } from "./quoted-selection";
+import { sessionDisplayTitle } from "./session-fork-name";
+import { toSlashPath } from "./paths";
+
 export interface SessionReferenceInput {
   id: string;
   name?: string;
   firstMessage: string;
   path: string;
+}
+
+/** A composer's draft, as the draft store holds it (or would, unmounted). */
+export interface ReferenceDraft {
+  value: string;
+  /** Attached images, if any: they make a leading `!` ordinary text. */
+  images?: readonly unknown[];
 }
 
 /**
@@ -29,7 +36,7 @@ export function escapeMarkdownLinkText(text: string): string {
 }
 
 /**
- * The session file as a link destination.
+ * The session file as a Markdown link destination (the `href` it renders to).
  *
  * A Windows path goes to slashes: a backslash destination keeps no href in
  * pi-web's Markdown (docs/agents/sessions.md, "Windows Markdown file links"),
@@ -51,12 +58,6 @@ export function sessionFileHref(path: string): string {
  * what someone is reaching for); a paragraph break inside it would be text
  * handed to the shell.
  */
-export interface ReferenceDraft {
-  value: string;
-  /** Attached images, if any: they make a leading `!` ordinary text. */
-  images?: readonly unknown[];
-}
-
 export function isBashDraft(draft: ReferenceDraft | null | undefined): boolean {
   if (!draft || (draft.images?.length ?? 0) > 0) return false;
   return draft.value.trimStart().startsWith("!");
@@ -68,7 +69,7 @@ export function isBashDraft(draft: ReferenceDraft | null | undefined): boolean {
  * own, exactly as `insertQuote` would place it, so it reads the same whenever
  * the composer comes back.
  */
-export function referenceDraftValue(draft: { value: string } | null | undefined, line: string): string {
+export function referenceDraftValue(draft: ReferenceDraft | null | undefined, line: string): string {
   const value = draft?.value ?? "";
   return value + quoteSeparator(value) + line;
 }
