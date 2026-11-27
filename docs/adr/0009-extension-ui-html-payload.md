@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. One optional field in one union plus one render branch. The extension that uses it lives in a separate repo (`pi-ask-user-plus`), and on an unpatched host it does what it does today: text.
+Accepted and implemented on the fork (`feat/extension-ui-html-payload`): the wire field, the panel, and the tests. A real browser click through a page-supplying extension is the remaining check. One optional field in one union plus one render branch. The extension that uses it lives in a separate repo (`pi-ask-user-plus`), and on an unpatched host it does what it does today: text.
 
 ## Context
 
@@ -35,13 +35,14 @@ Proposed. One optional field in one union plus one render branch. The extension 
 
 The fork keeps GitHub issues off, so the checklist lives here, as the voice ADR does.
 
-- [ ] `lib/types.ts`: `custom` takes `html?: string` and `pick?: { id; label? }[]`; `select` takes
-      `options[].preview_html?: string`. Optional only — no existing shape changes.
-- [ ] `ExtensionCustomPanel` in `components/ChatWindow.tsx`: with `html`, render
-      `<iframe sandbox="allow-scripts" srcDoc={html}>` above the existing line output.
-- [ ] `postMessage({ pick, label })` from the frame into the existing `onInput` / `extension_ui_input` path.
-- [ ] Reuse `hooks/useResizablePanel.ts` and add a maximize toggle, with the i18n label in en / zh-CN / zh-TW.
-- [ ] Tests: no `html` renders as today; with `html` the frame answers once on `pick`; an SSE reconnect
-      replays a pending `html` request the way the queue already replays others.
-- [ ] Out of scope here: the extension itself (`lwx475784/pi-ask-user-plus`), the TUI renderer, any HTTP
+- [x] `lib/types.ts`: `custom` takes `html?: string` and `pick?: { id; label? }[]`; `select` takes
+      `html` comes from a `htmlPreview()` method on the component. Optional only — no existing shape changes.
+- [x] `ExtensionCustomPanel` in `components/ChatWindow.tsx`: with `html`, render
+      `<iframe sandbox="allow-scripts" srcDoc={html}>` in place of the ANSI output.
+- [x] `postMessage({ pick, label })` from the frame into the existing `onInput` / `extension_ui_input` path.
+- [x] Reuse `hooks/useResizablePanel.ts` and add a maximize toggle, with the i18n label in en / zh-CN / zh-TW.
+- [x] Tests: no `html` renders as today; with `html` the frame answers once on `pick`; an SSE reconnect
+      replays a pending `html` request the way the queue already replays others (the queue is untouched, so the
+      replay path is inherited; a component test stubs `*.module.css` the way `ChatMinimap.test.mjs` does).
+- [x] Out of scope here: the extension itself (`lwx475784/pi-ask-user-plus`), the TUI renderer, any HTTP
       side-channel, and version negotiation.
