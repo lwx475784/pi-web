@@ -28,3 +28,18 @@ Proposed. One optional field in one union plus one render branch. The extension 
 - Everything else belongs to the plugin: candidate pages, alias and term display, keyboard handling, the TUI renderer, and the degradation ladder.
 - Whether upstream takes this is not decided here. The fork carries it first, and the plugin degrades to text on an unpatched host, so a slow upstream does not block the plugin.
 - Two hosts run pi-web here with different code: the office machine runs the npm build (0.18.0), and this one runs the fork. The patch lands on the fork only, so the enhancement is visible in fork-served sessions first.
+
+## Open issues
+
+The fork keeps GitHub issues off, so the checklist lives here, as the voice ADR does.
+
+- [ ] `lib/types.ts`: `custom` takes `html?: string` and `pick?: { id; label? }[]`; `select` takes
+      `options[].preview_html?: string`. Optional only — no existing shape changes.
+- [ ] `ExtensionCustomPanel` in `components/ChatWindow.tsx`: with `html`, render
+      `<iframe sandbox="allow-scripts" srcDoc={html}>` above the existing line output.
+- [ ] `postMessage({ pick, label })` from the frame into the existing `onInput` / `extension_ui_input` path.
+- [ ] Reuse `hooks/useResizablePanel.ts` and add a maximize toggle, with the i18n label in en / zh-CN / zh-TW.
+- [ ] Tests: no `html` renders as today; with `html` the frame answers once on `pick`; an SSE reconnect
+      replays a pending `html` request the way the queue already replays others.
+- [ ] Out of scope here: the extension itself (`lwx475784/pi-ask-user-plus`), the TUI renderer, any HTTP
+      side-channel, and version negotiation.
