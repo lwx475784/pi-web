@@ -1998,6 +1998,11 @@ export function ExtensionCustomPanel({
   const composingRef = useRef(false);
   const [collapsed, setCollapsed] = useState(false);
   const [full, setFull] = useState(false);
+  /** A phone gets the frame at full height: the desktop canvas would overflow it, and a
+   *  candidate page cannot be compared if it scrolls sideways (ADR 0009, D3). */
+  const [narrow, setNarrow] = useState(() =>
+    typeof window === "undefined" ? false : window.matchMedia("(max-width: 640px)").matches,
+  );
   /** One click in the frame answers the request; a second must not fire again. */
   const settledRef = useRef(false);
   const displayLines = normalizeCustomPanelLines(request.lines);
@@ -2007,6 +2012,13 @@ export function ExtensionCustomPanel({
     // A page wants the click, not a hidden textarea: only ANSI panels grab focus.
     if (!collapsed && !request.html) inputRef.current?.focus();
   }, [collapsed, request.html]);
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 640px)");
+    const onChange = () => setNarrow(query.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
 
   useEffect(() => {
     if (!request.html) return;
@@ -2087,8 +2099,10 @@ export function ExtensionCustomPanel({
           // and maximize takes it the whole way (ADR 0009).
           ...(request.html
             ? {
-                width: full ? "100%" : "min(1180px, 100%)",
-                height: full ? "100%" : "min(860px, 100%)",
+                width: full || narrow ? "100%" : "min(1180px, 100%)",
+                // dvh, not 100%: on a phone the visible height changes as the address bar
+                // hides, and a fixed canvas pushes the answer row off-screen.
+                height: full || narrow ? "100dvh" : "min(860px, 100%)",
                 minWidth: 0,
                 maxWidth: "100%",
                 maxHeight: "100%",
