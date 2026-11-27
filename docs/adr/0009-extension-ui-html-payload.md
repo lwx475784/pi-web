@@ -2,7 +2,16 @@
 
 ## Status
 
-Accepted and implemented on the fork (`feat/extension-ui-html-payload`): the wire field, the panel, and the tests. A real browser click through a page-supplying extension is the remaining check. One optional field in one union plus one render branch. The extension that uses it lives in a separate repo (`pi-ask-user-plus`), and on an unpatched host it does what it does today: text.
+Accepted and implemented on the fork (`feat/extension-ui-html-payload`): the wire field, the panel, and the tests.
+
+Verified on 2026-11-27 with a throwaway extension whose component carries `htmlPreview()`:
+
+- Patched host (`next dev`, port 30142, opened from another machine over the tailnet): the panel drew the page
+  at full size with a maximize toggle, `提交` ran each candidate's real timing, and one card click reached the
+  extension as `{"pick":"2","label":"轻条 · inline status message"}` — the notify line came from the extension's
+  own `done()`, so the hop `htmlPreview → iframe → postMessage → extension_ui_input → handleInput` is closed.
+- Unpatched host (the running production build, same extension, same machine): the panel showed the component's
+  ANSI lines, no error, no blank. That is the degradation half of this ADR, measured rather than assumed. One optional field in one union plus one render branch. The extension that uses it lives in a separate repo (`pi-ask-user-plus`), and on an unpatched host it does what it does today: text.
 
 ## Context
 
