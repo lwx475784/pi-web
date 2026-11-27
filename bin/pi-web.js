@@ -71,6 +71,11 @@ function exitWhenIdle(code) {
 }
 
 function startServer({ port, hostname, openBrowser }) {
+  // ADR 0009: this build accepts the optional \`html\` payload on custom panels and forwards a
+  // frame payload verbatim. Extensions share this process (or inherit its env) and cannot see
+  // our version, so advertise the capability instead of letting them guess from PI_WEB_* names
+  // that older builds set too.
+  process.env.PI_WEB_UI_HTML = "1";
 
   const pkgDir = path.join(__dirname, "..");
   const nextDir = path.join(pkgDir, ".next");
