@@ -2459,11 +2459,23 @@ export class AgentSessionWrapper {
     } catch (error) {
       lines = [`Extension custom UI render failed: ${error instanceof Error ? error.message : String(error)}`];
     }
+    // A component may draw itself as a page instead of ANSI (ADR 0009). The lines
+    // above still go out: an older host keeps them, and the collapsed bar shows a
+    // summary of them either way.
+    let html: string | undefined;
+    try {
+      const page = custom.component as { htmlPreview?: () => string | undefined };
+      if (typeof page.htmlPreview === "function") html = page.htmlPreview() || undefined;
+    } catch (error) {
+      // A page that throws falls back to lines; it never takes the panel down.
+      console.warn("extension custom UI htmlPreview failed:", error);
+    }
     const event = {
       type: "extension_ui_request",
       id,
       method: "custom",
       lines,
+      ...(html ? { html } : {}),
     } as ExtensionUiRequest as AgentEvent;
     this.pendingUiRequests.set(id, event);
     this.emit(event);

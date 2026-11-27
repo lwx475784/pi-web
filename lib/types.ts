@@ -212,6 +212,10 @@ export type ExtensionUiRequest =
       id: string;
       method: "custom";
       lines: string[];
+      /** The extension can also draw itself as a page (ADR 0009). A host that has
+       *  never heard of `html` shows `lines` and nothing breaks: the extension
+       *  sends both and the host picks, so capability needs no negotiation. */
+      html?: string;
       closed?: boolean;
     };
 

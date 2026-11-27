@@ -5,6 +5,7 @@ import Image from "next/image";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
 import { normalizeCustomPanelLines, stripAnsi } from "@/lib/ansi";
+import { toCustomPanelPickPayload } from "@/lib/extension-ui-payload";
 import { splitNoticeLinks, splitNoticeText } from "@/lib/notice-text";
 import { EXTENSION_DIALOG_BASE_WIDTH, fitExtensionDialogWidth } from "@/lib/extension-dialog-fit";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
@@ -1982,7 +1983,7 @@ function ExtensionDialog({
 
 type ExtensionCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
 
-function ExtensionCustomPanel({
+export function ExtensionCustomPanel({
   request,
   waitingCount,
   onInput,
@@ -1996,12 +1997,28 @@ function ExtensionCustomPanel({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [full, setFull] = useState(false);
+  /** One click in the frame answers the request; a second must not fire again. */
+  const settledRef = useRef(false);
   const displayLines = normalizeCustomPanelLines(request.lines);
   const summary = displayLines.map(stripAnsi).find((line) => line.trim())?.trim();
 
   useEffect(() => {
-    if (!collapsed) inputRef.current?.focus();
-  }, [collapsed]);
+    // A page wants the click, not a hidden textarea: only ANSI panels grab focus.
+    if (!collapsed && !request.html) inputRef.current?.focus();
+  }, [collapsed, request.html]);
+
+  useEffect(() => {
+    if (!request.html) return;
+    const onMessage = (event: MessageEvent) => {
+      const payload = toCustomPanelPickPayload(event.data);
+      if (!payload || settledRef.current) return;
+      settledRef.current = true;
+      onInput(request, payload);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [request, onInput]);
 
   return (
     <div
@@ -2065,10 +2082,23 @@ function ExtensionCustomPanel({
           position: "relative",
           // The extension already wrapped its lines to the width it asked for; show them
           // whole when that is wider than the usual 920px instead of scrolling sideways.
-          width: "max-content",
-          minWidth: "min(920px, 100%)",
-          maxWidth: "100%",
-          maxHeight: "min(760px, 100%)",
+          // An ANSI panel sizes to its own text. A page needs a canvas: three
+          // renderings side by side are only reviewable once they are big enough,
+          // and maximize takes it the whole way (ADR 0009).
+          ...(request.html
+            ? {
+                width: full ? "100%" : "min(1180px, 100%)",
+                height: full ? "100%" : "min(860px, 100%)",
+                minWidth: 0,
+                maxWidth: "100%",
+                maxHeight: "100%",
+              }
+            : {
+                width: "max-content",
+                minWidth: "min(920px, 100%)",
+                maxWidth: "100%",
+                maxHeight: "min(760px, 100%)",
+              }),
           display: "flex",
           flexDirection: "column",
           border: "1px solid var(--border)",
@@ -2131,6 +2161,30 @@ function ExtensionCustomPanel({
            <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 650 }}>{t("chat.extensionPanel")}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <ExtensionWaitingCount count={waitingCount} />
+            {request.html && (
+              <button
+                type="button"
+                onClick={() => setFull((open) => !open)}
+                title={t(full ? "chat.extensionRestoreSize" : "chat.extensionMaximize")}
+                aria-label={t(full ? "chat.extensionRestoreSize" : "chat.extensionMaximize")}
+                style={{
+                  display: "grid",
+                  placeItems: "center",
+                  width: 28,
+                  height: 28,
+                  borderRadius: 6,
+                  border: "1px solid var(--border)",
+                  background: "var(--bg-panel)",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  flexShrink: 0,
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M6 1.5h2.5V4M4 8.5H1.5V6" />
+                </svg>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setCollapsed(true)}
@@ -2170,6 +2224,14 @@ function ExtensionCustomPanel({
             </button>
           </div>
         </div>
+        {request.html ? (
+          <iframe
+            sandbox="allow-scripts"
+            srcDoc={request.html}
+            title={t("chat.extensionPanel")}
+            style={{ flex: 1, minHeight: 0, width: "100%", border: "none", background: "#ffffff" }}
+          />
+        ) : (
         <pre
           style={{
             margin: 0,
@@ -2186,6 +2248,7 @@ function ExtensionCustomPanel({
         >
           <AnsiText text={displayLines.join("\n")} />
         </pre>
+        )}
       </div>
       )}
     </div>
