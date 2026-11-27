@@ -27,6 +27,8 @@ Proposed. One optional field in one union plus one render branch. The extension 
 - About 40–60 lines plus a test: one optional field, one branch.
 - Everything else belongs to the plugin: candidate pages, alias and term display, keyboard handling, the TUI renderer, and the degradation ladder.
 - Whether upstream takes this is not decided here. The fork carries it first, and the plugin degrades to text on an unpatched host, so a slow upstream does not block the plugin.
+- The panel reuses the keys `chat.extensionMaximize` / `chat.extensionRestoreSize` that another panel already had: no new strings in three locales.
+- A component test that renders `ChatWindow` must stub `*.module.css` with `registerHooks`, the way `ChatMinimap.test.mjs` does; the frame's `sandbox="allow-scripts"` and the absence of `allow-same-origin` are asserted there, because a later edit that "just adds same-origin" would silently open the frame to the host DOM and its cookie.
 - Two hosts run pi-web here with different code: the office machine runs the npm build (0.18.0), and this one runs the fork. The patch lands on the fork only, so the enhancement is visible in fork-served sessions first.
 
 ## Open issues
