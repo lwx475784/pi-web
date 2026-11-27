@@ -5,7 +5,7 @@ import Image from "next/image";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
 import { normalizeCustomPanelLines, stripAnsi } from "@/lib/ansi";
-import { toCustomPanelPickPayload } from "@/lib/extension-ui-payload";
+import { toCustomPanelInput } from "@/lib/extension-ui-payload";
 import { splitNoticeLinks, splitNoticeText } from "@/lib/notice-text";
 import { EXTENSION_DIALOG_BASE_WIDTH, fitExtensionDialogWidth } from "@/lib/extension-dialog-fit";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
@@ -2023,7 +2023,7 @@ export function ExtensionCustomPanel({
   useEffect(() => {
     if (!request.html) return;
     const onMessage = (event: MessageEvent) => {
-      const payload = toCustomPanelPickPayload(event.data);
+      const payload = toCustomPanelInput(event.data);
       if (!payload || settledRef.current) return;
       settledRef.current = true;
       onInput(request, payload);

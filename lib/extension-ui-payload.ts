@@ -1,17 +1,18 @@
 /**
- * What a page inside the custom panel means when it clicks a choice (ADR 0009).
+ * What a page inside the custom panel means when it answers (ADR 0009).
  *
- * The frame posts `{ pick, label }`; the answer goes back over the channel that
- * already carries typed input, as one JSON line. Anything that is not a pick —
- * typed text, terminal key codes — keeps travelling as it does today, which is
- * what lets one extension serve a patched and an unpatched host at once.
+ * The host stays schema-agnostic: a frame posts a plain object, and the host forwards it
+ * verbatim as one JSON line over the channel that already carries typed input. What the
+ * payload *means* belongs to the extension — `{pick}` for a one-shot probe, `{answers:[…]}`
+ * or `{cancelled:true}` for a stepper page — and the extension decides whether to settle.
+ *
+ * The first version only forwarded `{pick}`, which silently swallowed every other shape:
+ * the panel looked frozen because the extension never received the answer. That is why the
+ * guard here is "plain object with at least one key", not a field list.
  */
-export function toCustomPanelPickPayload(data: unknown): string | null {
-  if (!data || typeof data !== "object") return null;
-  const { pick, label } = data as { pick?: unknown; label?: unknown };
-  if (typeof pick !== "string" || pick.length === 0) return null;
-  return JSON.stringify({
-    pick,
-    ...(typeof label === "string" && label ? { label } : {}),
-  });
+export function toCustomPanelInput(data: unknown): string | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const keys = Object.keys(data as Record<string, unknown>);
+  if (keys.length === 0) return null;
+  return JSON.stringify(data);
 }
