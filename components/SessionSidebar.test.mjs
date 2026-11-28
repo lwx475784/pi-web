@@ -538,3 +538,34 @@ test("every way of opening a session reveals its row through one effect keyed on
   // Only the open session's effect and a moved group ask the main tree for a row.
   assert.equal(source.match(/\bsetTreeReveal\(\{/g)?.length, 2);
 });
+
+test("the row menu's copy-ID entry takes the session's own id, and opens nothing", () => {
+  const dispatch = between("const runSessionAction = ", "\n  const openRowMenu = ");
+  // Copy puts the family root's id on the clipboard alone (subagents and side
+  // chats fold into that row, so the row stands for that one session), so what
+  // arrives elsewhere is just the id. The reference half is upstream's Insert
+  // into chat — the fork's second row-menu reference is gone on purpose.
+  assert.match(dispatch, /case "insert-into-chat": onInsertSessionReference\?\.\(family\.root\); break;/);
+  assert.match(dispatch, /case "copy-id": copyFamilyId\(family\); break;/);
+  assert.doesNotMatch(dispatch, /case "reference":/);
+  // Neither opens the session nor moves the sidebar's cwd: a row still opens on
+  // a click, and these two only take the row somewhere else.
+  assert.doesNotMatch(dispatch, /onSelectSession|setSelectedCwd|handleSelectFamily/);
+
+  const copy = callbackBody("copyFamilyId");
+  assert.match(copy, /copyText\(root\.id\)/);
+  // Both outcomes are handled: a refused copy cannot raise the dev overlay as an
+  // unhandled rejection, nor claim a copy that never happened (lib/clipboard.ts).
+  assert.match(copy, /\.then\(\s*\(\) => showToast\(t\("sidebar\.copiedSessionId"/);
+  assert.match(copy, /error: unknown\) => showToast\(t\("sidebar\.copySessionIdFailed"/);
+  // No file yet, nothing to copy (a transient row has no menu either).
+  assert.match(copy, /if \(root\.transient\) return;/);
+
+  // The label: the session-info panel's own words for the same payload. The
+  // reference half is upstream's — Insert into chat — and the fork keeps no second
+  // row-menu reference entry: one mechanism, one label (lib/session-reference.ts).
+  const labels = between("const SESSION_ACTION_LABEL_KEYS", "\nfunction sessionActionIcon");
+  assert.match(labels, /"copy-id": "session\.copyId",/);
+  assert.match(labels, /"insert-into-chat": "sidebar\.insertIntoChat",/);
+  assert.doesNotMatch(labels, /(^|\W)reference: /);
+});

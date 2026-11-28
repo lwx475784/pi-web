@@ -2167,6 +2167,65 @@
   flex-shrink: 0;
 }
 
+/* Voice input: one labelled line per setting, control filling the row. */
+.settings-voice-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.settings-voice-label {
+  flex-shrink: 0;
+  min-width: 8em;
+  color: var(--text);
+}
+
+.settings-voice-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  box-sizing: border-box;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: left;
+}
+
+.settings-voice-input::placeholder { color: var(--text-dim); }
+
+.settings-voice-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.settings-voice-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.settings-voice-value {
+  flex-shrink: 0;
+  min-width: 2ch;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* The note under a row explains that row, not the section above it. */
+.settings-voice-row + .settings-general-description {
+  margin: 5px 0 0;
+}
+
 .settings-general-error {
   margin: 8px 0 0;
   color: #ef4444;

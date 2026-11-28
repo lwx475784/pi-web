@@ -19,6 +19,10 @@ import {
   MAX_ATTACHED_IMAGES,
   isBase64ImageWithinLimits,
 } from "@/lib/image-attachments";
+import { VoiceInputButton } from "./VoiceInputButton";
+import { VoiceCallButton } from "./VoiceCallButton";
+import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { joinTranscript } from "@/lib/voice/text";
 import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
@@ -128,6 +132,8 @@ interface Props {
   cwd?: string | null;
   /** Files picked with the attach button, handled like files dropped onto the chat. Without it the button takes images only. */
   onAttachFiles?: (files: File[]) => void;
+  /** Opens the two-layer realtime voice call. Omitted when there is no live session. */
+  onVoiceCall?: () => void;
 }
 
 export interface ChatInputHandle {
@@ -893,6 +899,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   draftKey,
   cwd,
   onAttachFiles,
+  onVoiceCall,
   compact = false,
 }: Props, ref) {
   const { t, locale } = useI18n();
@@ -1015,6 +1022,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       autoGrowTextarea(ta);
     });
   }, []);
+
+  const insertVoiceSegment = useCallback((text: string) => {
+    const ta = textareaRef.current;
+    if (!ta) {
+      setValue((v) => joinTranscript(v, text));
+      return;
+    }
+    const caret = ta.selectionStart ?? ta.value.length;
+    const insert = joinTranscript(ta.value.slice(0, caret), text);
+    if (!insert) return;
+    replaceTextareaRange(ta, caret, caret, insert);
+    setAtQuery(null);
+    requestAnimationFrame(() => autoGrowTextarea(ta));
+  }, []);
+  const voice = useVoiceInput(insertVoiceSegment);
+  const voiceCancel = voice.cancel;
 
   useImperativeHandle(ref, () => ({
     addSessionReference,
@@ -1477,6 +1500,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const msg = value.trim();
     const references = attachedReferencesRef.current;
     if (!msg && !attachedImages.length && !references.length) return;
+    // A send closes the dictation the way Escape does: whatever the mic had
+    // already transcribed belongs to this message, and the next one starts clean.
+    voiceCancel();
     onAudioUnlock?.();
     const builtinAllowed = !isStreaming || offersBuiltinSlashCommandWhileStreaming(msg);
     if (builtinAllowed && await runBuiltinCommand(msg)) return;
@@ -1484,9 +1510,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (isStreaming && !(msg.startsWith("!") && !attachedImages.length)) return;
     clearInput();
     // The chips become `[title](#session:id)` tokens at the end of the message,
-    // the one form the server expands (lib/session-reference.ts).
+    // the one form the server expands (lib/session-reference.ts). Dictation lands
+    // in `msg` the same way typed text does, so a quoted session and a spoken
+    // question travel in one submission.
     onSend(withSessionReferences(msg, references), attachedImages.length ? attachedImages : undefined);
-  }, [value, attachedImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+  }, [value, attachedImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock, voiceCancel]);
 
   const slashQuery = !compact && value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -3284,6 +3312,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           </div>
         )}
 
+        {voice.status === "connecting" || voice.status === "listening" || voice.status === "finishing" || (voice.status === "error" && voice.error) ? (
+          <div
+            className="text-xs px-2 py-1"
+            role={voice.status === "error" ? "alert" : "status"}
+            style={{ color: voice.status === "error" ? "#ef4444" : "var(--text-muted)", marginTop: 4 }}
+          >
+            {voice.status === "error"
+              ? t("chat.voiceError", { message: voice.error ?? "" })
+              : voice.status === "connecting"
+                ? t("chat.voiceConnecting")
+                : voice.status === "finishing"
+                  ? t("chat.voiceFinishing")
+                  : voice.partial || t("chat.voiceListening")}
+          </div>
+        ) : null}
+
         {/* Bottom bar: left | center (context) | right */}
         {!compact && <div className="chat-input-controls" style={{
           marginTop: isMobile ? 4 : 8,
@@ -3323,6 +3367,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <polyline points="21 15 16 10 5 21" />
               </svg>
             </button>
+            <VoiceInputButton
+              status={voice.status}
+              support={voice.support}
+              isMobile={isMobile}
+              controlSize={controlSize}
+              onStart={voice.start}
+              onStop={voice.stop}
+            />
+            {onVoiceCall && !compact && (
+              <VoiceCallButton isMobile={isMobile} controlSize={controlSize} onStart={onVoiceCall} />
+            )}
             {/* Model selector - visible always, busy while a switch is pending; a switch during a run applies from its next request */}
             {(modelOptions.length > 0 || model || modelError) && onModelChange && (
               <ModelSelector

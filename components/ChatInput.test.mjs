@@ -855,6 +855,7 @@ test("handleSend lets a handled /mcp through while streaming and sends an unowne
       attachedImages: [],
       attachedReferencesRef: { current: [] },
       withSessionReferences: (text) => text,
+      voiceCancel() {},
       onAudioUnlock() {},
       isStreaming,
       offersBuiltinSlashCommandWhileStreaming,

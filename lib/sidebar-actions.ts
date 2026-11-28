@@ -6,12 +6,14 @@
  * (it copies the finished entries of its current branch), so it is offered
  * everywhere: while the family runs and from the archive too. Insert into chat
  * only adds a chip to the open composer (nothing is written), so it is offered
- * everywhere a saved session is, beside Open in new tab. Open in new tab only
- * navigates (a browser tab loads the session's link): it is offered everywhere
- * a saved session is, after the actions that manage the session and before
- * Delete. Never first: a menu's first item takes focus when it opens, so Enter
- * right after opening would leave the tab. Also the requests behind a project
- * group's "Delete all sessions", with `fetch` passed in.
+ * everywhere a saved session is, beside Open in new tab. Copy session ID only
+ * takes the row somewhere else, so it sits with Open in new tab; neither opens
+ * the session — a row still opens on a click, and a menu action never moves the
+ * cwd. Open in new tab only navigates (a browser tab loads the session's link):
+ * it is offered everywhere a saved session is, after the actions that manage the
+ * session and before Delete. Never first: a menu's first item takes focus when it
+ * opens, so Enter right after opening would leave the tab. Also the requests
+ * behind a project group's "Delete all sessions", with `fetch` passed in.
  */
 
 import { projectNameOf, type SidebarFamilyStatus, type SidebarProject, type SidebarRow } from "./session-tree";
@@ -28,6 +30,7 @@ export type SessionMenuActionId =
   | "mark-read"
   | "mark-unread"
   | "archive"
+  | "copy-id"
   | "unarchive"
   | "delete";
 
@@ -47,6 +50,12 @@ export function sessionMenuEntries(
 ): SessionMenuEntry[] {
   if (status.transient) return [];
   const openNewTab: SessionMenuEntry = { kind: "action", id: "open-new-tab", shortcut: "T" };
+  // Copy session ID writes nothing and only takes the row somewhere else, so it
+  // is offered while the family runs and from the archive too, beside Open in
+  // new tab. The fork's own row-menu "reference in this chat" is gone on purpose:
+  // upstream landed Insert into chat, which writes a `#session:<id>` token the
+  // server expands at send time (lib/session-reference.ts). One mechanism, not two.
+  const copyId: SessionMenuEntry = { kind: "action", id: "copy-id", shortcut: "C" };
   if (context === "archive") {
     return [
       { kind: "action", id: "unarchive", shortcut: "A" },
@@ -54,6 +63,7 @@ export function sessionMenuEntries(
       { kind: "action", id: "rename", shortcut: "R" },
       { kind: "action", id: "fork", shortcut: "F" },
       { kind: "action", id: "insert-into-chat", shortcut: "I" },
+      copyId,
       openNewTab,
       { kind: "separator" },
       { kind: "action", id: "delete", shortcut: "D" },
@@ -69,6 +79,7 @@ export function sessionMenuEntries(
       ? { kind: "action", id: "archive", shortcut: "A", disabledReason: "running" }
       : { kind: "action", id: "archive", shortcut: "A" },
     { kind: "action", id: "insert-into-chat", shortcut: "I" },
+    copyId,
     openNewTab,
     { kind: "separator" },
     { kind: "action", id: "delete", shortcut: "D" },

@@ -133,6 +133,28 @@ export function OpenInNewTabIcon(props: SidebarIconProps) {
   );
 }
 
+/** Two pages: a session row's "Copy session ID", as the session-info panel's
+ *  copy buttons draw it. */
+export function CopyIcon(props: SidebarIconProps) {
+  return (
+    <SidebarIcon {...props}>
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </SidebarIcon>
+  );
+}
+
+/** A quoted block: a session row's "Reference in this chat" (the row's line
+ *  goes into the composer, it does not open the row). */
+export function QuoteIcon(props: SidebarIconProps) {
+  return (
+    <SidebarIcon {...props}>
+      <path d="M5 4v16" />
+      <path d="M10 7h9M10 12h9M10 17h6" />
+    </SidebarIcon>
+  );
+}
+
 export function TrashIcon(props: SidebarIconProps) {
   return (
     <SidebarIcon {...props}>

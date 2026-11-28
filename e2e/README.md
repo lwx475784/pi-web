@@ -46,7 +46,12 @@ Coverage:
   a new tab while the original keeps its own; both tabs keep their session
   through reloads; pinned and archived rows link the same way; nothing
   creates, copies or prompts a session; a missing session's link selects none
-  in a fresh profile; a keyboard Fork puts focus on the copy row's link.
+  in a fresh profile; a keyboard Fork puts focus on the copy row's link; the
+  row menu's Reference in this chat (⋯, Q) writes one Markdown line naming the
+  clicked row's session file into the open composer — at 1280px it takes the caret
+  and changes no URL, selected row or request, and at 390px it closes the drawer
+  and still lands; Copy session ID (⋯, C) puts that row's bare id on the clipboard
+  and toasts it.
 - Project groups offer Open in new tab (`project-navigation.mjs`, desktop
   and mobile Chromium): the current linked worktree, another project's root,
   and a pinned project without sessions open as fresh composers. Reload keeps

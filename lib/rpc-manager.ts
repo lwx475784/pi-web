@@ -5,6 +5,7 @@ import { randomUUID } from "crypto";
 import { existsSync, statSync, writeFileSync } from "fs";
 import { isDeepStrictEqual } from "util";
 import { validateAgentImages } from "./image-attachments";
+import { claimRequestId, extractMessageText, normalizeRequestId, rememberRequestId, type PendingRequestId } from "./request-correlation";
 import { EXTENSION_REPORTED_CODE } from "./agent-client";
 import { cwdMissingError } from "./missing-cwd";
 import { invalidateModelsCache } from "./models-cache";
@@ -237,6 +238,13 @@ const IDLE_RESET_EVENT_TYPES = new Set([
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
+ * How long a `requestId` may name the streaming run before `prompt_done` stops echoing it. A run
+ * that outlives this still completes; its caller simply falls back to polling instead of being
+ * handed an id nobody is waiting for any more.
+ */
+const RUN_REQUEST_ID_STALE_MS = 30 * 60_000;
+
+/**
  * Resolves the PI_WEB_IDLE_TIMEOUT_MS environment variable into a session idle
  * timeout in milliseconds. An unset/blank value returns the 10-minute default,
  * `0` disables idle shutdown, and positive values up to Node's timer limit
@@ -390,6 +398,15 @@ export class AgentSessionWrapper {
   private pendingPromptCount = 0;
   /** Prompts that reached send() and wait on the extensions or their admission, not counted yet. */
   private arrivingPromptCount = 0;
+  /**
+   * Correlation ids a REST caller sent with its prompt (`{requestId}`), waiting for pi to append
+   * that very message. pi gives the caller no id of its own, so the id travels with the text
+   * until the text lands (ADR 0008).
+   */
+  private pendingRequestIds: PendingRequestId[] = [];
+  /** The id of the run now streaming, when its caller supplied one; consumed by that run's `prompt_done`. */
+  private runRequestId: string | null = null;
+  private runRequestIdAt = 0;
   // Prompts waiting for the running compaction to finish (ParkedPrompt above).
   private parkedDuringCompaction: ParkedPrompt[] = [];
   private activeMutatingCommands = 0;
@@ -769,10 +786,18 @@ export class AgentSessionWrapper {
       for (let i = branch.length - 1; i >= 0; i--) {
         const entry = branch[i];
         if (entry.type !== "message" || (entry as SessionMessageEntry).message !== message) continue;
+        const claimed = claimRequestId(this.pendingRequestIds, extractMessageText(message));
+        // The first id claimed while a run streams named the message that started it; later claims
+        // are messages that joined that run (a steer, a follow-up) and must not steal its id.
+        if (claimed && this.runRequestId === null) {
+          this.runRequestId = claimed.requestId;
+          this.runRequestIdAt = Date.now();
+        }
         this.emit({
           type: "user_message_entry",
           entryId: entry.id,
           timestamp: (message as { timestamp?: unknown }).timestamp,
+          ...(claimed ? { requestId: claimed.requestId } : {}),
         });
         return;
       }
@@ -862,10 +887,30 @@ export class AgentSessionWrapper {
 
   /**
    * `prompt_done`, saying `aborted` when the prompt's run was stopped rather than finished, and
-   * `subagentsActive` while a subagent under this session can still start another run here.
+   * `subagentsActive` while a subagent under this session can still start another run here. A
+   * caller that named its submission with a `requestId` gets it back, so it can tell its own run's
+   * end from another client's; the id is consumed here, since it named the run that just ended.
    */
   private promptDoneEvent(): AgentEvent {
-    return this.withSubagentsActive({ type: "prompt_done", ...(this.lastRunAborted ? { aborted: true } : {}) });
+    // A stale id (its caller stopped listening, or the run ended through another path) is dropped
+    // rather than echoed onto the next run.
+    const requestId = this.runRequestId !== null && Date.now() - this.runRequestIdAt <= RUN_REQUEST_ID_STALE_MS
+      ? this.runRequestId
+      : null;
+    this.runRequestId = null;
+    return this.withSubagentsActive({
+      type: "prompt_done",
+      ...(this.lastRunAborted ? { aborted: true } : {}),
+      ...(requestId ? { requestId } : {}),
+    });
+  }
+
+  /** Drop a correlation id whose prompt was refused before it was ever delivered. */
+  private forgetRequestId(requestId: string | undefined): void {
+    if (!requestId) return;
+    const at = this.pendingRequestIds.findIndex((entry) => entry.requestId === requestId);
+    if (at !== -1) this.pendingRequestIds.splice(at, 1);
+    if (this.runRequestId === requestId) this.runRequestId = null;
   }
 
   /** The end of a run of this session's, marked when its subagents keep the task going: no chime yet. */
@@ -981,9 +1026,10 @@ export class AgentSessionWrapper {
       // Refused unsent: keep it as a queue row for Recall or the next compaction end, as the TUI's restoreQueue().
       if (disposition === undefined) this.parkDuringCompaction(entry);
       this.emit({
-        type: "prompt_error",
-        errorMessage: failure instanceof Error ? failure.message : String(failure),
-      });
+          type: "prompt_error",
+          errorMessage: failure instanceof Error ? failure.message : String(failure),
+          ...(this.runRequestId ? { requestId: this.runRequestId } : {}),
+        });
     }
     // The client of a plain prompt waits for prompt_done; the delivery that started
     // the run sends it when that run ends, one that joined a run rides that run's.
@@ -1532,6 +1578,7 @@ export class AgentSessionWrapper {
           this.renewExtensionUiStop();
           const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
           const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
+          const requestId = normalizeRequestId(command.requestId);
           let preflightAccepted = false;
           let preflightSettled = false;
           let promptSettled = false;
@@ -1602,6 +1649,14 @@ export class AgentSessionWrapper {
           if (!streamingBehavior) this.lastRunAborted = false;
           let prompt: Promise<void>;
           try {
+            // Recorded before the call: pi appends the message in the same step it accepts the
+            // prompt, so an id registered afterwards could miss its own delivery. It records the
+            // text pi will actually append: upstream expands `#session:<id>` tokens into a
+            // `<session-reference>` block before this call (lib/session-reference.ts), and the
+            // correlation matches by text (lib/request-correlation.ts) — recording the raw
+            // `command.message` would leave every prompt that quotes another session unmatched,
+            // so the voice call would fall back to polling exactly when a quote is involved.
+            rememberRequestId(this.pendingRequestIds, requestId, promptMessage);
             prompt = this.inner.prompt(promptMessage, {
               ...(promptImages?.length ? { images: promptImages } : {}),
               ...(streamingBehavior ? { streamingBehavior } : {}),
@@ -1649,6 +1704,7 @@ export class AgentSessionWrapper {
               return;
             }
             rejectPreflight(error);
+            this.forgetRequestId(requestId);
             finishPrompt();
             invalidateSessionListCache();
             // A preflight rejection is returned by the POST itself. Only an
@@ -1657,6 +1713,7 @@ export class AgentSessionWrapper {
               this.emit({
                 type: "prompt_error",
                 errorMessage: error instanceof Error ? error.message : String(error),
+                ...(this.runRequestId ? { requestId: this.runRequestId } : {}),
               });
               if (!streamingBehavior) this.emit(this.promptDoneEvent());
             }
