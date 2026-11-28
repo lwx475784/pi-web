@@ -764,6 +764,12 @@ export function VoiceConversationPanel({ callKey, sessionId, onEnsureSession, on
         display: "flex", flexDirection: "column", gap: 8, padding: 14,
       }}
     >
+        {/* While the call is still being connected the panel has nothing in it but a
+            header, and a still panel reads as a dead one. Two layers of accent light
+            cross the background behind the captions until the line is won — the lease,
+            the socket, the microphone — and then fade out. `.voice-connect-motion` in
+            globals.css carries the motion and the reduced-motion fallback. */}
+        <div aria-hidden="true" className={`voice-connect-motion${status === "connecting" ? " is-connecting" : ""}`} />
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {statusDot}
           <strong style={{ fontSize: 14 }}>{t("voiceCall.title")}</strong>

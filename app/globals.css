@@ -3001,6 +3001,99 @@ span.token.table {
   }
 }
 
+/* The call panel while it connects: getting the line, opening the socket and
+   starting the microphone takes a second or two, and the panel holds nothing but
+   a header and a dim dot for that long, which reads as a stuck page rather than
+   a dialling one. Two layers of accent light cross the background behind the
+   captions until the call is live: a bed of light breathing at the bottom (it
+   says “not stuck”) and one soft band walking across (it says “still going”). The
+   wrapper only fades — so the fade-out still runs when both animations are
+   dropped — and the pseudo-elements carry the motion. z-index -1 lands them above
+   the panel's own background and below the captions, because the panel is a
+   stacking context (fixed + z-index). */
+.voice-connect-motion {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  border-radius: inherit;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 320ms ease-out;
+}
+
+.voice-connect-motion.is-connecting {
+  opacity: 1;
+}
+
+/* The bed. Stacked with the band, so it breathes shallower than it would alone. */
+.voice-connect-motion::before {
+  content: "";
+  position: absolute;
+  left: -10%;
+  right: -10%;
+  bottom: -46%;
+  height: 74%;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--accent) 40%, transparent), transparent 72%);
+  filter: blur(16px);
+  opacity: 0.2;
+  animation: voice-connect-breathe 2.4s ease-in-out infinite;
+}
+
+/* The band. It is 148% of the panel wide (inset -24% each side), so ±46% of its
+   own width walks it in from fully off-screen left and out off-screen right. */
+.voice-connect-motion::after {
+  content: "";
+  position: absolute;
+  inset: -40% -24%;
+  background: linear-gradient(
+    115deg,
+    transparent 36%,
+    color-mix(in srgb, var(--accent) 18%, transparent) 50%,
+    transparent 64%
+  );
+  animation: voice-connect-sweep 3.6s linear infinite;
+}
+
+@keyframes voice-connect-breathe {
+  0%, 100% {
+    opacity: 0.2;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.05);
+  }
+}
+
+@keyframes voice-connect-sweep {
+  from {
+    transform: translateX(-46%);
+  }
+  to {
+    transform: translateX(46%);
+  }
+}
+
+/* Frozen mid-panel both layers still say “waiting”, they just stop travelling. */
+@media (prefers-reduced-motion: reduce) {
+  .voice-connect-motion {
+    transition: none;
+  }
+
+  .voice-connect-motion::before {
+    animation: none;
+    opacity: 0.35;
+    transform: none;
+  }
+
+  .voice-connect-motion::after {
+    animation: none;
+    opacity: 0.6;
+    transform: translateX(0);
+  }
+}
+
 /* While the software keyboard is up (set by useViewportHeight), only a few
    hundred pixels remain above it. Hand them to the conversation: collapse the
    model/controls row, the extension status shelf and a fresh composer's
