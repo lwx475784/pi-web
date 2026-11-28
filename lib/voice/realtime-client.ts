@@ -92,6 +92,49 @@ export interface RealtimeClientOptions {
 }
 
 const SILENCE_CHUNK_B64 = "AA".repeat(3200); // 100 ms of 16 kHz mono PCM16
+const SILENCE_CHUNK_MS = 100;
+
+/**
+ * The endpointing window: how long a silence has to run before the server's VAD ends the
+ * turn. Left unset the server runs its own 300 ms — `min_silence_duration_ms: 300` in
+ * `VAD/vad_handler.py`, its *minimum*, and 2.7x more aggressive than the 800 ms the OpenAI
+ * Realtime convention documents (range 200-6000). Measured on the live server 2026-11-28 with
+ * one synthesized sentence carrying a 600 ms mid-sentence pause: at 300 ms the VAD logged
+ * `soft-ended (segment=2368ms)` and then reopened the same turn (`rev=1`, `segment=2208ms`) —
+ * the sentence was cut in half — while at 800 ms it logged a single `segment=5056ms` and
+ * committed the whole line. Reported before the fix as "一句话后半段经常没录进去".
+ *
+ * Everything that ends a turn *on purpose* derives from this number and from
+ * `SERVER_TURN_HOLD_MS` below: the silence streamed at release has to exceed the window, and
+ * the wait for the commit has to outlast the server's hold. The two 300 ms constants that used
+ * to sit here were matched by hand, which is how raising one silently breaks the other (a
+ * window longer than the streamed silence means the release path never commits, waits out its
+ * timeout, and discards the sentence it was trying to save).
+ */
+export const ENDPOINT_SILENCE_MS = 800;
+
+/** Silence frames that clear the endpointing window, plus one frame of margin. */
+export function silenceChunksToCommit(): number {
+  return Math.ceil(ENDPOINT_SILENCE_MS / SILENCE_CHUNK_MS) + 1;
+}
+
+/**
+ * How long the release path may wait for the sentence in flight, past the silence it streams.
+ *
+ * The floor is set by the server, not by us: `speech-to-speech` runs a turn-completeness
+ * classifier (Smart Turn) that holds a soft-ended utterance for `smart_turn_incomplete_delay_ms`
+ * (600) plus `smart_turn_max_wait_ms` (2000) of speculative reopen before it commits — measured
+ * on the live server 2026-11-28: `Smart Turn: incomplete (p=0.432); using 2000ms speculative
+ * reopen grace and delaying processing by 600ms`, with the commit landing just after that delay.
+ * A wait under that holds nothing, so the release path would discard the sentence it streamed
+ * silence for — which is the failure this whole path exists to avoid.
+ *
+ * The wait returns as soon as the commit lands, so the cap costs nothing on the common path.
+ */
+export const SERVER_TURN_HOLD_MS = 600 + 2_000;
+export function flushWaitMs(): number {
+  return SERVER_TURN_HOLD_MS + 400;
+}
 
 /**
  * Marks an injected message as something the user did not say, so the voice
@@ -216,6 +259,8 @@ export class RealtimeDictationClient {
                   input: {
                     turn_detection: {
                       type: "server_vad",
+                      // The server's own default is its 300 ms minimum; see ENDPOINT_SILENCE_MS.
+                      silence_duration_ms: ENDPOINT_SILENCE_MS,
                       ...(this.gate ? { create_response: false } : {}),
                     },
                   },
@@ -315,7 +360,7 @@ export class RealtimeDictationClient {
   }
 
   /** Flush a trailing utterance: the server VAD commits on the silence. */
-  sendSilenceChunks(count = 5): void {
+  sendSilenceChunks(count = silenceChunksToCommit()): void {
     for (let i = 0; i < count; i++) this.sendAudio(SILENCE_CHUNK_B64);
   }
 
@@ -329,14 +374,16 @@ export class RealtimeDictationClient {
    * Returns whether the sentence landed. When it did not, the dangling transcript is dropped: a
    * half-word the user abandoned must not reappear in the caption of the next call.
    */
-  async flushSpeakingTurn(timeoutMs = 300): Promise<boolean> {
+  async flushSpeakingTurn(timeoutMs = flushWaitMs()): Promise<boolean> {
     if (!this.ws) return true;
     const settled = new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => resolve(false), timeoutMs);
       this.speakingWaiters.push(() => { clearTimeout(timer); resolve(true); });
     });
-    // Three 100 ms frames clears the server's 300 ms minimum silence, which is what ends a turn.
-    this.sendSilenceChunks(3);
+    // Enough silence to clear the window: the server ends a turn on silence, and a stream
+    // that merely stops gives it none. Both this count and the wait above come from
+    // ENDPOINT_SILENCE_MS so they cannot drift apart from the value in session.update.
+    this.sendSilenceChunks(silenceChunksToCommit());
     const landed = await settled;
     if (!landed) this.discardSpeakingTurn();
     return landed;

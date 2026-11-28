@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { RealtimeDictationClient } from "@/lib/voice/realtime-client";
+import { RealtimeDictationClient, silenceChunksToCommit } from "@/lib/voice/realtime-client";
 import { startMicCapture, type MicHandle } from "@/lib/voice/mic";
 import { getGateSensitivity, getRealtimeUrls, getVoiceEnabled } from "@/lib/voice/settings";
 import { createNearSpeechGate } from "@/lib/voice/turn-gate";
@@ -22,8 +22,9 @@ export function detectVoiceSupport(): VoiceSupport {
 // ASR pass runs; the session closes early as soon as the finals land.
 const FINISH_GRACE_MS = 5000;
 // Appended on stop: the server VAD ends turns on silence, and a stream that
-// simply stops never gives it any.
-const FLUSH_SILENCE_CHUNKS = 6;
+// simply stops never gives it any. Derived, not counted by hand — it has to
+// exceed the window in session.update (lib/voice/realtime-client.ts).
+const FLUSH_SILENCE_CHUNKS = silenceChunksToCommit();
 const ERROR_AUTO_IDLE_MS = 2500;
 
 export interface UseVoiceInputResult {
