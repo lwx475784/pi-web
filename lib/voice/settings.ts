@@ -26,9 +26,17 @@ function browserStorage(): ItemStorage | null {
  * Defaults for this deployment: the home Tailnet TLS endpoint first, then the
  * LAN address. Override with a single URL in Settings → General → Voice input.
  * A one-line change when the fork points the feature somewhere else.
+ *
+ * The speech-to-speech server on Win binds 0.0.0.0:8765 and speaks plaintext,
+ * so `wss://…:8765` has nothing to shake hands with. Tailscale Serve on that
+ * machine terminates the tailnet certificate on **8766** and proxies it to 8765
+ * (`tailscale serve --https=8766 --bg http://127.0.0.1:8765`); the port differs
+ * from the plaintext one because Serve cannot take a port the server already
+ * holds. 8766 is tailnet-only, hence the LAN candidate behind it for `http://`
+ * pages. Verified from mm: a real WebSocket client reaches /v1/realtime over both.
  */
 export const DEFAULT_REALTIME_URLS = [
-  "wss://desktop.quoll-stairs.ts.net:8765/v1/realtime",
+  "wss://desktop.quoll-stairs.ts.net:8766/v1/realtime",
   "ws://192.168.124.194:8765/v1/realtime",
 ];
 
