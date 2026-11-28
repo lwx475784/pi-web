@@ -55,3 +55,33 @@ The fork keeps GitHub issues off, so the checklist lives here, as the voice ADR 
       replay path is inherited; a component test stubs `*.module.css` the way `ChatMinimap.test.mjs` does).
 - [x] Out of scope here: the extension itself (`lwx475784/pi-ask-user-plus`), the TUI renderer, any HTTP
       side-channel, and version negotiation.
+
+## Follow-up · 上游 0.19.0 合进这条分支（2026-11-28，合并提交 `25582352`）
+
+上游领先这条分支 37 个提交（v0.19.0 + 2）。合完在 worktree 里量，不在生产上试：
+
+- **合并本身零冲突**（先用 `git merge-tree` 三方预演说过零，真合并与它一致）。分支只碰 8 个文件，
+  其中 3 个（`components/ChatWindow.tsx`、`lib/rpc-manager.ts`、`lib/types.ts`）上游也改过，
+  但改的不是同一处。
+- 宿主全量 **3836 条，10 红**；同一份 node_modules 下把 worktree 切到**纯净 `origin/main`** 再跑，
+  红的是**同样那 10 条**。它们是本机的环境，不是合并：`lib/subagent-package-scope.integration.test.mjs`
+  9 条断言的是精确的技能/工具清单，而 mm 装了 ~40 个用户级技能；另 1 条 `.npmrc` 单独跑就绿。
+  记在这儿是为了下一位不去追这 10 条。
+- `tsc --noEmit` 0 错；`next build --webpack` 过。
+- 候选页对合并后的构建（临时实例 30145，不在 30141 上）**12/12、0 跳过**。
+
+三个上游提交落在这份 ADR 的表面上，现在都是量过的而不是推的：
+
+- `23f318cd` 把 `frame-ancestors` 默认收到 Pi Web 自己的源。面板是 `srcDoc` 帧：没有导航、没有响应，
+  这条策略管不到它 —— 上面 12 条就是证据，不是推理。
+- `ea36a8f9` 把 pi 升到 1.6.1。`custom` 与 `pasteToEditor` / `setEditorText` 形状没变，
+  所以扩展那边只认 `PI_WEB_UI_HTML` 这个标记（capability-by-silence）仍然说它原本说的话。
+- `daf24fff` + `bf81275e` + `bad7ef35` 把 `#` 在输入框引用其他会话落到 `lib/session-reference.ts`
+  （`[title](#session:<id>)`，发送时在服务端展开成带 bounded transcript 的 `<session-reference>` 块）。
+  fork 自建的行菜单引用（`feature/voice-input` 里同名但不同物的 94 行 `lib/session-reference.ts`）
+  从此就是重复的那一份：第二跳吃上游的，删 fork 的。上游的 `session.copyId` 是**会话信息面板**的复制按钮，
+  **行菜单**上的复制 ID 上游没有。
+
+语音入口还差一个宿主属性，记在这儿但不在这个 ADR 里做：面板的 iframe 是 `sandbox="allow-scripts"`，
+没有 `allow="microphone"`，而且它只在一次扩展 UI 请求期间存在。所以扩展能搬走转写这一半
+（工具 + `pasteToEditor` + 这个面板），搬不走浏览器那一半的麦克风。
